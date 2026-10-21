@@ -1,0 +1,64 @@
+name: DataWhisper Data Audit
+
+# Autonomous PR auditor: whenever a pull request touches SQL assets, migrations
+# or embedded database files, DataWhisper computes schema drift, optional query
+# benchmarks and (when a GEMINI_API_KEY secret is configured) agentic data
+# insights, then upserts a sticky executive report on the PR conversation.
+on:
+  pull_request:
+    paths:
+      - "**.sql"
+      - "**.sqlite"
+      - "**.sqlite3"
+      - "**.duckdb"
+      - "migrations/**"
+      - "db/**"
+      - "seeds/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: datawhisper-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Autonomous data & schema audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history (base and head revisions)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install DataWhisper
+        run: pip install -e ".[duckdb]"
+
+      - name: Run autonomous audit
+        env:
+          DATAWHISPER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: enables the agentic insight layer. Without it the audit
+          # still runs fully deterministic (drift + benchmarks only).
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          datawhisper audit \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --base-ref "${{ github.base_ref }}" \
+            --head-ref "${{ github.event.pull_request.head.sha }}" \
+            --fail-on-regression
+
+      - name: Upload interactive Plotly report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: datawhisper-audit-report
+          path: datawhisper-report/
+          if-no-files-found: ignore

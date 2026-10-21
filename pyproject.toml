@@ -1,0 +1,77 @@
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "datawhisper"
+version = "0.1.0"
+description = "Enterprise-grade, local-first agentic tabular data engine with self-correcting SQL and autonomous GitHub PR auditing."
+authors = ["DataWhisper Maintainers <maintainers@datawhisper.local>"]
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["sql", "agent", "llm", "sqlite", "duckdb", "github-actions", "ci"]
+packages = [{ include = "datawhisper" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.7"
+typer = "^0.12"
+rich = "^13.7"
+sqlglot = ">=23.0,<26.0"
+requests = "^2.31"
+plotly = "^5.22"
+duckdb = { version = ">=0.10", optional = true }
+openai = { version = ">=1.30", optional = true }
+google-generativeai = { version = ">=0.6", optional = true }
+streamlit = { version = ">=1.35", optional = true }
+
+[tool.poetry.extras]
+duckdb = ["duckdb"]
+llm = ["openai", "google-generativeai"]
+ui = ["streamlit"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2"
+pytest-mock = "^3.14"
+mypy = "^1.10"
+ruff = ">=0.4"
+black = "^24.4"
+types-requests = "^2.31"
+pre-commit = "^3.7"
+
+[tool.poetry.scripts]
+datawhisper = "datawhisper.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["datawhisper", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+exclude = ["tests"]
+
+[[tool.mypy.overrides]]
+module = [
+    "duckdb.*",
+    "openai.*",
+    "google.*",
+    "streamlit.*",
+    "plotly.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
