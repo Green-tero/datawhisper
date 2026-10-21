@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import requests
 import sqlglot
@@ -102,6 +103,20 @@ def _extract_tables(sql_text: str) -> tuple[dict[str, dict[str, str]], list[str]
     except sqlglot.errors.ParseError as exc:
         return {}, [f"migration file unparsable: {exc}"]
     for statement in statements:
+        if isinstance(statement, exp.Alter) and statement.kind == "TABLE":
+            alter_table = statement.find(exp.Table)
+            if alter_table is None:
+                continue
+            altered = tables.setdefault(alter_table.name.lower(), {})
+            for action in statement.args.get("actions") or []:
+                if isinstance(action, exp.ColumnDef):
+                    kind = action.args.get("kind")
+                    altered[action.name.lower()] = (
+                        kind.sql().upper() if kind is not None else "UNKNOWN"
+                    )
+                elif isinstance(action, exp.Drop) and isinstance(action.this, exp.Column):
+                    altered.pop(action.this.name.lower(), None)
+            continue
         if not (isinstance(statement, exp.Create) and statement.kind == "TABLE"):
             continue
         table_node = statement.find(exp.Table)
@@ -631,7 +646,7 @@ class GitHubClient:
         try:
             response = self._request(
                 "GET",
-                f"{self._api_base}/repos/{self._repo}/contents/{path}",
+                f"{self._api_base}/repos/{self._repo}/contents/{quote(path, safe='/')}",
                 params={"ref": ref},
                 headers={"Accept": "application/vnd.github.raw"},
             )

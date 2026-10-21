@@ -4,11 +4,11 @@ DataWhisper answers questions about your data and reviews database changes in pu
 
 It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits and data masking stay in code you can read.
 
-**Current release: 1.2.1.**
+**Current release: 1.2.2.** See [CHANGELOG.md](CHANGELOG.md).
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Release](https://img.shields.io/badge/release-1.2.1-blue)
+![Release](https://img.shields.io/badge/release-1.2.2-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **Language / زبان:** open a section below. English is open by default.
@@ -239,7 +239,7 @@ Measured on the development machine (Windows, Python 3.15, SQLite in memory) at 
 | Schema retrieval (BM25 + Dijkstra) | 60-table FK chain | **0.72 ms** |
 | AST validation | join + aggregate + LIMIT | **0.39 ms** |
 | PII scrubbing | 10,000 cells across 5 columns | **28.9 ms** |
-| Full test suite | 123 tests | ~1.6 s |
+| Full test suite | 134 tests | ~1.6 s |
 
 Reproduce the graph number:
 
@@ -278,13 +278,13 @@ Two choices are deliberate. Comments and semicolons are rejected even inside str
 ```bash
 poetry install --with dev --extras "duckdb arrow"
 pre-commit install
-poetry run pytest -v          # 123 tests
+poetry run pytest -v          # 134 tests
 poetry run ruff check .
 poetry run black --check .
 poetry run mypy datawhisper   # strict
 ```
 
-Test coverage highlights: 22 injection/bypass vectors, cartesian and scan-budget gate behavior, Luhn/SSN/phone/API-key/JWT detection, zero-leak assertions on engine output and profile top values, 60-table BM25 retrieval and 35-hop pathfinding, multi-engine execution (SQLite, DuckDB, Parquet, JSONL), and self-correction after security, cost and driver failures.
+Test coverage highlights: 23 injection/bypass vectors, cartesian and scan-budget gate behavior, Luhn/SSN/phone/API-key/JWT detection, zero-leak assertions on engine output and profile top values, 60-table BM25 retrieval and 35-hop pathfinding, multi-engine execution (SQLite, DuckDB, Parquet, JSONL), and self-correction after security, cost and driver failures.
 
 ## License
 
@@ -307,7 +307,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 **۲. ناظر Pull Request.** روی PRهایی که SQL، مهاجرت یا فایل داده را تغییر می‌دهند، بات دریفت اسکیما در سطح ستون، ستون‌های حساس تازه‌معرفی‌شده، افت کارایی پلن (تبدیل جست‌وجوی ایندکس به اسکن کامل) و کندی کوئری‌ها را گزارش می‌کند و یک کامنت چسبان را به‌روز می‌کند. گزارش تعاملی Plotly هم به‌صورت artifact بارگذاری می‌شود.
 
-**نسخه فعلی: ۱.۲.۱.**
+**نسخه فعلی: ۱.۲.۲.** تغییرات را در [CHANGELOG.md](CHANGELOG.md) ببینید.
 
 خبری از LangChain یا LlamaIndex نیست. عامل یک حلقه‌ی ReAct کوچک با پایتون ساده است و هر دستور تولیدشده توسط مدل، پیش از اجرا از بررسی AST و دروازه‌ی هزینه مبتنی بر EXPLAIN عبور می‌کند.
 
@@ -542,7 +542,7 @@ datawhisper ask "which country generates the most refund risk?" --db demo.sqlite
 | بازیابی اسکیما (BM25 + دایکسترا) | زنجیره ۶۰ جدولی FK | **۰.۷۲ میلی‌ثانیه** |
 | اعتبارسنجی AST | join + aggregate + LIMIT | **۰.۳۹ میلی‌ثانیه** |
 | پاک‌سازی PII | ۱۰٬۰۰۰ سلول در ۵ ستون | **۲۸.۹ میلی‌ثانیه** |
-| کل تست‌ها | ۱۲۳ تست | حدود ۱.۶ ثانیه |
+| کل تست‌ها | ۱۳۴ تست | حدود ۱.۶ ثانیه |
 
 بازتولید عدد گراف:
 
@@ -591,7 +591,7 @@ datawhisper audit --base-sql schema.sql --head-sql schema.sql \
 ```bash
 poetry install --with dev --extras "duckdb arrow"
 pre-commit install
-poetry run pytest -v          # ۱۲۳ تست
+poetry run pytest -v          # ۱۳۴ تست
 poetry run ruff check .
 poetry run black --check .
 poetry run mypy datawhisper   # سخت‌گیرانه
@@ -599,7 +599,7 @@ poetry run mypy datawhisper   # سخت‌گیرانه
 
 <div dir="rtl">
 
-پوشش تست‌ها: ۲۲ بردار تزریق/فرار، رفتار دروازه برای JOIN دکارتی و بودجه اسکن، تشخیص ایمیل/کارت با لان/SSN/تلفن/کلید API/JWT، تضمین نشت‌صفر روی خروجی موتور و مقادیر پرتکرار پروفایل، بازیابی BM25 روی ۶۰ جدول و مسیر ۳۵ گامی، اجرای چندموتوری (SQLite، DuckDB، Parquet، JSONL) و خوداصلاحی پس از خطای امنیتی، هزینه و درایور.
+پوشش تست‌ها: ۲۳ بردار تزریق/فرار، رفتار دروازه برای JOIN دکارتی و بودجه اسکن، تشخیص ایمیل/کارت با لان/SSN/تلفن/کلید API/JWT، تضمین نشت‌صفر روی خروجی موتور و مقادیر پرتکرار پروفایل، بازیابی BM25 روی ۶۰ جدول و مسیر ۳۵ گامی، اجرای چندموتوری (SQLite، DuckDB، Parquet، JSONL) و خوداصلاحی پس از خطای امنیتی، هزینه و درایور.
 
 ## مجوز
 

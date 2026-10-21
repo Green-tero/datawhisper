@@ -128,6 +128,26 @@ def _numeric_pairs(
     return series
 
 
+def _aligned_numeric(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]], left: str, right: str
+) -> tuple[list[float], list[float]]:
+    """Collect rows where *both* columns are numeric.
+
+    Filtering each column independently would pair values from different rows
+    and make Pearson's r meaningless as soon as nulls appear.
+    """
+    left_index, right_index = columns.index(left), columns.index(right)
+    xs: list[float] = []
+    ys: list[float] = []
+    for row in rows:
+        if left_index < len(row) and right_index < len(row):
+            left_value, right_value = row[left_index], row[right_index]
+            if _is_numeric(left_value) and _is_numeric(right_value):
+                xs.append(float(left_value))
+                ys.append(float(right_value))
+    return xs, ys
+
+
 def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     size = min(len(xs), len(ys))
     if size < 3:
@@ -200,17 +220,10 @@ def auto_charts(
     if len(numeric_columns) >= 2:
         matrix: list[list[float | None]] = []
         for left in numeric_columns:
-            left_values = [
-                float(r[columns.index(left)]) for r in rows if _is_numeric(r[columns.index(left)])
-            ]
             row_values: list[float | None] = []
             for right in numeric_columns:
-                right_values = [
-                    float(r[columns.index(right)])
-                    for r in rows
-                    if _is_numeric(r[columns.index(right)])
-                ]
-                row_values.append(_pearson(left_values, right_values))
+                xs, ys = _aligned_numeric(columns, rows, left, right)
+                row_values.append(_pearson(xs, ys))
             matrix.append(row_values)
         if any(value is not None for line in matrix for value in line):
             figure = go.Figure(

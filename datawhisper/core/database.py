@@ -993,6 +993,11 @@ class ExecutionEngine:
             if self.backend.driver_name in _DRIVERS_WITHOUT_INTERRUPT:
                 self._poisoned = True
             raise QueryTimeoutError(f"statement exceeded the {timeout}s execution budget") from exc
+        except QueryExecutionError as exc:
+            # Driver messages can echo literals from the statement. Scrub
+            # before the text reaches the agent, telemetry or the terminal.
+            clean, _ = self._scrubber.scrub_text(str(exc))
+            raise QueryExecutionError(clean, driver=exc.driver) from exc
         return result, (perf_counter() - start) * 1000.0
 
 

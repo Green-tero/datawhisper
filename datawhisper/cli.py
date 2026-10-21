@@ -116,7 +116,9 @@ def _print_agent_result(result: AgentResult) -> None:
         )
     )
     if result.sql:
-        console.print(Panel(result.sql, title="final SQL", border_style="blue"))
+        scrubber = PrivacyScrubber(DataWhisperConfig.from_env().privacy)
+        safe_sql = scrubber.scrub_text(result.sql)[0]
+        console.print(Panel(safe_sql, title="final SQL", border_style="blue"))
 
 
 def _print_plan(plan: PlanInfo, decision: CostDecision) -> None:

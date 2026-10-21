@@ -231,6 +231,7 @@ class SchemaGraph:
         self._tables: dict[str, TableInfo] = {t.name.lower(): t for t in catalog.tables}
         self._adjacency: dict[str, dict[str, JoinStep]] = {}
         self._keys: list[ForeignKeyInfo] = []
+        self._outgoing_fk_columns: dict[str, set[str]] = {}
         self._docs: dict[str, list[str]] = {}
         self._idf: dict[str, float] = {}
         self._avgdl: float = 0.0
@@ -243,6 +244,10 @@ class SchemaGraph:
         for name in self._tables:
             self._adjacency[name] = {}
         self._keys = self._collect_foreign_keys()
+        for key in self._keys:
+            self._outgoing_fk_columns.setdefault(key.from_table.lower(), set()).update(
+                key.from_columns
+            )
         for key in self._keys:
             if len(key.from_columns) != 1 or len(key.to_columns) != 1:
                 continue  # composite keys are rendered but not traversed
@@ -402,9 +407,10 @@ class SchemaGraph:
 
     def _prune_table(self, name: str, tokens: Sequence[str], score: float) -> GraphTable:
         table = self._tables[name]
-        fk_columns = {column for key in table.foreign_keys for column in key.from_columns}
-        for neighbour_step in self._adjacency.get(name, {}).values():
-            fk_columns.add(neighbour_step.left_column)
+        # Only columns that actually hold a reference are foreign keys. The
+        # adjacency graph lists both directions, so using it here would label
+        # the parent-side primary key as an FK.
+        fk_columns = set(self._outgoing_fk_columns.get(name, set()))
         token_set = set(tokens)
 
         columns: list[GraphColumn] = []

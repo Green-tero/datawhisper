@@ -129,6 +129,23 @@ _BLOCKED_FUNCTIONS: Final[frozenset[str]] = frozenset(
         "pg_cancel_backend",
         "set_config",
         "pg_advisory_lock",
+        # DuckDB catalog/system introspection. duckdb_secrets() exposes
+        # credential material from SECRET objects, so it is denied.
+        "duckdb_secrets",
+        "duckdb_settings",
+        "duckdb_extensions",
+        "duckdb_views",
+        "duckdb_tables",
+        "duckdb_columns",
+        "duckdb_constraints",
+        "duckdb_functions",
+        "duckdb_databases",
+        "duckdb_dependencies",
+        "duckdb_indexes",
+        "duckdb_memory",
+        "duckdb_temporary_files",
+        "duckdb_storage_info",
+        "current_setting",
     }
 )
 
@@ -374,8 +391,10 @@ def current_limit(sql: str, dialect: str = "sqlite") -> int | None:
         tree = sqlglot.parse_one(sql, read=dialect)
     except sqlglot.errors.ParseError:
         return None
-    limit = tree.find(exp.Limit)
-    if limit is None:
+    # find() would return a LIMIT inside a subquery, which does not bound the
+    # outer result set. Only the root clause bounds the statement.
+    limit = tree.args.get("limit")
+    if not isinstance(limit, exp.Limit):
         return None
     expression = limit.expression
     if isinstance(expression, exp.Literal) and expression.is_int:
@@ -389,8 +408,8 @@ def apply_limit(sql: str, dialect: str, limit: int) -> str | None:
         tree = sqlglot.parse_one(sql, read=dialect)
     except sqlglot.errors.ParseError:
         return None
-    existing = tree.find(exp.Limit)
-    if existing is not None:
+    existing = tree.args.get("limit")
+    if isinstance(existing, exp.Limit):
         expression = existing.expression
         if (
             isinstance(expression, exp.Literal)
@@ -497,9 +516,17 @@ def detect_cartesian_joins(sql: str, dialect: str = "sqlite") -> list[list[str]]
         for alias in scope:
             union.add(alias)
 
-        for join in select.find_all(exp.Join):
-            if join.find_ancestor(exp.Select) is not select:
+        from_clause = select.args.get("from")
+        previous: str | None = None
+        if isinstance(from_clause, exp.From) and isinstance(from_clause.this, exp.Expression):
+            previous = (from_clause.this.alias_or_name or "").lower() or None
+        for join in select.args.get("joins") or []:
+            if not isinstance(join, exp.Join):
                 continue
+            target = join.this
+            joined = (
+                (target.alias_or_name or "").lower() if isinstance(target, exp.Expression) else ""
+            )
             on_clause = join.args.get("on")
             if isinstance(on_clause, exp.Expression):
                 linked = _aliases_in(on_clause, scope)
@@ -507,6 +534,13 @@ def detect_cartesian_joins(sql: str, dialect: str = "sqlite") -> list[list[str]]
                     ordered = sorted(linked)
                     for alias in ordered[1:]:
                         union.union(ordered[0], alias)
+            elif join.args.get("using") or join.args.get("method") == "NATURAL":
+                # USING/NATURAL joins are joins by definition; connect the new
+                # table to its left neighbour instead of flagging a cartesian.
+                if previous in scope and joined in scope:
+                    union.union(previous, joined)
+            if joined:
+                previous = joined
 
         where = select.args.get("where")
         if isinstance(where, exp.Expression):
@@ -598,9 +632,7 @@ class CostGatekeeper:
             # row counts, and when the plan exposed no nodes at all, to the
             # tables named in the AST - otherwise an empty plan would silently
             # look free.
-            scan_tables = plan.scan_tables or (
-                extract_table_names(sql, plan.dialect) if not plan.nodes else []
-            )
+            scan_tables = plan.scan_tables or extract_table_names(sql, plan.dialect)
             estimated = float(sum(rows.get(name, 0) for name in scan_tables))
 
         if estimated > policy.max_scan_rows:
