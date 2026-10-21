@@ -216,7 +216,6 @@ def test_repairs_after_security_rejection(engine: ExecutionEngine) -> None:
     result = agent.run("how many orders?")
     assert result.success
     assert result.steps[0].observation.startswith("[SECURITY ERROR]")
-    assert result.steps[0].observation.startswith("[SECURITY ERROR]") is True
 
 
 def test_repairs_after_cost_rejection(engine: ExecutionEngine) -> None:

@@ -56,7 +56,7 @@ from datawhisper.core.models import (
     TableInfo,
     TabularResult,
 )
-from datawhisper.core.privacy import PrivacyScrubber, column_category
+from datawhisper.core.privacy import PrivacyScrubber
 from datawhisper.core.security import (
     CostDecision,
     CostGatekeeper,
@@ -391,9 +391,8 @@ class SQLiteBackend:
 class DuckDBBackend:
     """DuckDB adapter covering native files plus Parquet/JSONL/CSV views."""
 
-    def __init__(self, connection: Any, *, hardened: bool = False) -> None:
+    def __init__(self, connection: Any) -> None:
         self._conn = connection
-        self._hardened = hardened
         self._closed = False
 
     @property
@@ -442,7 +441,7 @@ class DuckDBBackend:
         # therefore enforced one level up: the AST sandbox rejects every
         # user-initiated read_* / COPY / INSTALL / ATTACH, and the engine only
         # ever exposes this single, engine-constructed view.
-        return cls(connection, hardened=True)
+        return cls(connection)
 
     # --- execution -----------------------------------------------------
     def fetch(self, sql: str, limit: int) -> TabularResult:
@@ -1007,5 +1006,4 @@ __all__ = [
     "QueryExecutionError",
     "QueryTimeoutError",
     "SQLiteBackend",
-    "column_category",
 ]

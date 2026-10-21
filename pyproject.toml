@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "datawhisper"
-version = "2.0.0"
+version = "1.2.1"
 description = "Zero-trust agentic data analysis and CI/CD database governance engine with graph-pruned context, Arrow pipelines and PII-safe outputs."
 authors = ["DataWhisper Maintainers <maintainers@datawhisper.local>"]
 license = "Apache-2.0"

@@ -524,6 +524,8 @@ def format_audit_report(
     # --- Insights ------------------------------------------------------
     if insights:
         scrubbed = scrubber.scrub_text(insights)[0] if scrubber else insights
+        # Neutralise HTML that could close our <details> block.
+        scrubbed = scrubbed.replace("<details", "&lt;details").replace("</details", "&lt;/details")
         lines.append("<details>")
         lines.append("<summary><b>🤖 Agentic insights</b> (verify before merging)</summary>")
         lines.append("")

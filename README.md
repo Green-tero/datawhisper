@@ -1,9 +1,14 @@
-# DataWhisper v2.0
+# DataWhisper v1.2
 
-Zero-trust agentic data analysis and CI/CD database governance. Ask questions about SQLite, DuckDB, PostgreSQL, Parquet or JSONL data — and get a bot that reviews schema, privacy and query-plan changes on every pull request.
+DataWhisper answers questions about your data and reviews database changes in pull requests.
+
+It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits and data masking stay in code you can read.
+
+**Current release: 1.2.1.**
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Release](https://img.shields.io/badge/release-1.2.1-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **Language / زبان:** open a section below. English is open by default.
@@ -13,19 +18,19 @@ Zero-trust agentic data analysis and CI/CD database governance. Ask questions ab
 
 <br>
 
-**Contents:** [What it does](#what-it-does) · [What's new in v2](#whats-new-in-v2) · [Architecture](#architecture) · [Security model](#security-model) · [Engines](#supported-engines) · [Quickstart](#quickstart) · [60-second demo](#try-it-in-60-seconds) · [Commands](#commands) · [GitHub Action](#using-it-as-a-github-action) · [Configuration](#configuration) · [Benchmarks](#benchmarks) · [Development](#development) · [License](#license)
+**Contents:** [What it does](#what-it-does) · [What's new in 1.2](#whats-new-in-12) · [Architecture](#architecture) · [Security model](#security-model) · [Engines](#supported-engines) · [Quickstart](#quickstart) · [60-second demo](#try-it-in-60-seconds) · [Commands](#commands) · [GitHub Action](#using-it-as-a-github-action) · [Configuration](#configuration) · [Benchmarks](#benchmarks) · [Development](#development) · [License](#license)
 
 ## What it does
 
 **1. A local analysis tool.** Ask a question about a dataset. DataWhisper prunes a large schema down to the relevant tables and join paths, writes SQL, runs it behind an AST sandbox and a cost gate, repairs its own errors, and scrubs sensitive values before showing you anything.
 
-**2. A pull-request governor.** On a PR that touches SQL, migrations or data files, the bot reports column-level schema drift, flags newly introduced PII columns, detects plan regressions (an index lost to a sequential scan) and latency drift, then updates one sticky comment. A full interactive Plotly report is uploaded as an artifact.
+**2. A pull-request reviewer.** On a PR that touches SQL, migrations or data files, the bot reports column-level schema drift, flags newly introduced PII columns, detects plan regressions (an index lost to a sequential scan) and latency drift, then updates one sticky comment. A full interactive Plotly report is uploaded as an artifact.
 
 No LangChain, no LlamaIndex. The agent is a small ReAct loop in plain Python; every model-produced statement is checked as an AST and passed through an EXPLAIN-based cost gate before execution.
 
-## What's new in v2
+## What's new in 1.2
 
-| Area | v1.0 | v2.0 |
+| Area | Before | 1.2 |
 | --- | --- | --- |
 | Large schemas | full DDL in the prompt | BM25 retrieval + FK graph + Dijkstra join paths, token-budgeted |
 | Data movement | row lists | native Arrow tables from DuckDB; lazy materialization elsewhere |
@@ -263,6 +268,12 @@ datawhisper audit --base-sql schema.sql --head-sql schema.sql \
   --bench-file benchmarks/queries.sql --fail-on-regression
 ```
 
+## Design notes
+
+The model is treated as an untrusted component, not an oracle. It may propose SQL, but nothing runs until the statement passes the AST sandbox, the planner budget and the scrubber. The same constraint shapes schema retrieval: rather than hoping a large prompt surfaces the right table, the selection step is explicit and testable.
+
+Two choices are deliberate. Comments and semicolons are rejected even inside string literals, because parser differences are a genuine bypass class. And when a planner is unavailable, the default is to continue under hard timeouts instead of rejecting every query; set `DW_PLAN_FAILURE_POLICY=reject` if your environment requires fail-closed behavior.
+
 ## Development
 
 ```bash
@@ -289,7 +300,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 <div dir="rtl">
 
-**فهرست:** [این پروژه چه کار می‌کند](#این-پروژه-چه-کار-می-کند) · [تازه‌های نسخه ۲](#تازه-های-نسخه-۲) · [معماری](#معماری) · [مدل امنیتی](#مدل-امنیتی) · [موتورها](#موتورهای-پشتیبانی‌شده) · [راه‌اندازی](#راه-اندازی-سریع) · [دموی ۶۰ ثانیه‌ای](#دموی-۶۰-ثانیه-ای) · [دستورات](#دستورات) · [اکشن گیت‌هاب](#استفاده-به-عنوان-github-action) · [تنظیمات](#تنظیمات) · [بنچمارک](#بنچمارک) · [توسعه](#توسعه) · [مجوز](#مجوز)
+**فهرست:** [این پروژه چه کار می‌کند](#این-پروژه-چه-کار-می-کند) · [تازه‌های نسخه ۱.۲](#تازه-های-نسخه-۱۲) · [معماری](#معماری) · [مدل امنیتی](#مدل-امنیتی) · [موتورها](#موتورهای-پشتیبانی‌شده) · [راه‌اندازی](#راه-اندازی-سریع) · [دموی ۶۰ ثانیه‌ای](#دموی-۶۰-ثانیه-ای) · [دستورات](#دستورات) · [اکشن گیت‌هاب](#استفاده-به-عنوان-github-action) · [تنظیمات](#تنظیمات) · [بنچمارک](#بنچمارک) · [توسعه](#توسعه) · [مجوز](#مجوز)
 
 ## این پروژه چه کار می‌کند
 
@@ -297,11 +308,13 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 **۲. ناظر Pull Request.** روی PRهایی که SQL، مهاجرت یا فایل داده را تغییر می‌دهند، بات دریفت اسکیما در سطح ستون، ستون‌های حساس تازه‌معرفی‌شده، افت کارایی پلن (تبدیل جست‌وجوی ایندکس به اسکن کامل) و کندی کوئری‌ها را گزارش می‌کند و یک کامنت چسبان را به‌روز می‌کند. گزارش تعاملی Plotly هم به‌صورت artifact بارگذاری می‌شود.
 
+**نسخه فعلی: ۱.۲.۱.**
+
 خبری از LangChain یا LlamaIndex نیست. عامل یک حلقه‌ی ReAct کوچک با پایتون ساده است و هر دستور تولیدشده توسط مدل، پیش از اجرا از بررسی AST و دروازه‌ی هزینه مبتنی بر EXPLAIN عبور می‌کند.
 
-## تازه‌های نسخه ۲
+## تازه‌های نسخه ۱.۲
 
-| حوزه | نسخه ۱ | نسخه ۲ |
+| حوزه | پیش از این | ۱.۲ |
 | --- | --- | --- |
 | اسکیمای بزرگ | کل DDL در prompt | بازیابی BM25 + گراف FK + مسیر JOIN با دایکسترا و بودجه توکن |
 | انتقال داده | لیست ردیف | جدول بومی Arrow از DuckDB و مادی‌سازی تنبل در بقیه |
@@ -565,6 +578,12 @@ datawhisper audit --base-sql schema.sql --head-sql schema.sql \
 ```
 
 <div dir="rtl">
+
+## یادداشت طراحی
+
+مدل یک مؤلفه‌ی غیرقابل‌اعتماد است، نه یک مرجع. می‌تواند SQL پیشنهاد بدهد، اما تا وقتی دستور از جعبه‌امن AST، بودجه‌ی پلن‌گیر و پاک‌ساز عبور نکند اجرا نمی‌شود. همین محدودیت، بازیابی اسکیما را هم شکل می‌دهد: به‌جای امید به یک prompt بزرگ، انتخاب جدول‌ها صریح و قابل تست است.
+
+دو انتخاب عمدی است. کامنت و سمی‌کالن حتی داخل رشته‌های متنی رد می‌شوند، چون تفاوت پارسرها یک دسته‌ی واقعی دورزدن است. و وقتی پلن‌گیر در دسترس نیست، پیش‌فرض ادامه با تایم‌اوت سخت است، نه رد همه‌ی کوئری‌ها؛ اگر محیط شما fail-closed می‌خواهد، `DW_PLAN_FAILURE_POLICY=reject` بگذارید.
 
 ## توسعه
 

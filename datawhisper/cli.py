@@ -69,6 +69,11 @@ DEFAULT_AUDIT_QUESTION = (
 )
 
 
+def _quote_identifier(name: str) -> str:
+    """Quote a catalog name for a locally constructed query."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _open_engine(source: str, config: DataWhisperConfig) -> ExecutionEngine:
     try:
         return ExecutionEngine.from_source(source, config)
@@ -319,7 +324,7 @@ def dashboard(
 
         sample_sql = sql
         if sample_sql is None and catalog.tables:
-            sample_sql = f'SELECT * FROM "{catalog.tables[0].name}" LIMIT 200'
+            sample_sql = f"SELECT * FROM {_quote_identifier(catalog.tables[0].name)} LIMIT 200"
 
         kpis = [
             KpiCard("tables", str(len(catalog.tables))),
@@ -357,11 +362,12 @@ def dashboard(
                     _print_agent_result(agent_result)
                     blocks.append(timeline_block(agent_result.steps))
 
+        redaction_groups = len(redactions.by_category) if redactions else 0
         html = render_report_html(
             title="DataWhisper Dashboard",
             subtitle=(
                 f"generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} • {db} • "
-                f"PII: {redaction_badges(redactions).count('badge warn')} redaction group(s)"
+                f"PII: {redaction_groups} redaction group(s)"
             ),
             blocks=blocks,
             kpis=kpis,

@@ -9,6 +9,7 @@ are computed in pure Python so the module does not require NumPy.
 
 from __future__ import annotations
 
+import html
 import math
 from collections import Counter
 from collections.abc import Sequence
@@ -52,6 +53,11 @@ class ChartBlock:
     def __init__(self, heading: str, html: str) -> None:
         self.heading = heading
         self.html = html
+
+
+def _esc(value: object) -> str:
+    """Escape untrusted text (model output, identifiers, paths) for HTML."""
+    return html.escape(str(value), quote=True)
 
 
 def _dark_layout(title: str) -> go.Layout:
@@ -325,11 +331,11 @@ def plan_html(plan: PlanInfo | None) -> str:
     if plan is None:
         return '<p class="muted">No plan captured for this report.</p>'
     if plan.error:
-        return f'<p class="muted">Planner unavailable: {plan.error}</p>'
+        return f'<p class="muted">Planner unavailable: {_esc(plan.error)}</p>'
     rows = "".join(
-        f"<tr><td>{node.node_type}</td><td>{node.table or '—'}</td>"
+        f"<tr><td>{_esc(node.node_type)}</td><td>{_esc(node.table or '—')}</td>"
         f"<td>{'' if node.estimated_rows is None else int(node.estimated_rows)}</td>"
-        f"<td class='muted'>{node.detail[:120]}</td></tr>"
+        f"<td class='muted'>{_esc(node.detail[:120])}</td></tr>"
         for node in plan.nodes[:40]
     )
     return (
@@ -342,10 +348,10 @@ def redaction_badges(report: RedactionReport | None) -> str:
     if report is None or report.total == 0:
         return '<span class="badge ok">no PII detected</span>'
     badges = "".join(
-        f'<span class="badge warn">{category}: {count}</span>'
+        f'<span class="badge warn">{_esc(category)}: {int(count)}</span>'
         for category, count in sorted(report.by_category.items())
     )
-    return badges + f'<span class="badge">{report.mode}</span>'
+    return badges + f'<span class="badge">{_esc(report.mode)}</span>'
 
 
 # ---------------------------------------------------------------------------
@@ -354,10 +360,10 @@ def redaction_badges(report: RedactionReport | None) -> str:
 def _kpi_grid(cards: Sequence[KpiCard]) -> str:
     parts: list[str] = []
     for card in cards:
-        detail = f'<div class="detail">{card.detail}</div>' if card.detail else ""
+        detail = f'<div class="detail">{_esc(card.detail)}</div>' if card.detail else ""
         parts.append(
-            f'<div class="card"><div class="label">{card.label}</div>'
-            f'<div class="value">{card.value}</div>{detail}</div>'
+            f'<div class="card"><div class="label">{_esc(card.label)}</div>'
+            f'<div class="value">{_esc(card.value)}</div>{detail}</div>'
         )
     return f'<div class="grid">{"".join(parts)}</div>'
 
@@ -406,15 +412,15 @@ def render_report_html(
     kpis: Sequence[KpiCard] = (),
     raw_sections: Sequence[tuple[str, str]] = (),
 ) -> str:
-    parts = [_HEAD, f"<h1>{title}</h1>"]
+    parts = [_HEAD, f"<h1>{_esc(title)}</h1>"]
     if subtitle:
-        parts.append(f'<div class="meta">{subtitle}</div>')
+        parts.append(f'<div class="meta">{_esc(subtitle)}</div>')
     if kpis:
         parts.append(_kpi_grid(kpis))
     for block in blocks:
-        parts.append(f"<h2>{block.heading}</h2>{block.html}")
-    for heading, html in raw_sections:
-        parts.append(f"<h2>{heading}</h2>{html}")
+        parts.append(f"<h2>{_esc(block.heading)}</h2>{block.html}")
+    for heading, section_html in raw_sections:
+        parts.append(f"<h2>{_esc(heading)}</h2>{section_html}")
     parts.append("</div></body></html>\n")
     return "".join(parts)
 
@@ -463,7 +469,8 @@ def render_audit_html(
         raw_sections.append(("Query execution plan", plan_html(plan)))
     if regressions:
         rows = "".join(
-            f"<tr><td><code>{r.label}</code></td><td>{r.kind}</td><td>{r.detail}</td></tr>"
+            f"<tr><td><code>{_esc(r.label)}</code></td><td>{_esc(r.kind)}</td>"
+            f"<td>{_esc(r.detail)}</td></tr>"
             for r in regressions
         )
         raw_sections.append(
@@ -475,8 +482,8 @@ def render_audit_html(
         )
     if pii_findings:
         rows = "".join(
-            f"<tr><td><code>{f.table}</code></td><td><code>{f.column}</code></td>"
-            f"<td>{f.category.value}</td><td>{f.reason}</td></tr>"
+            f"<tr><td><code>{_esc(f.table)}</code></td><td><code>{_esc(f.column)}</code></td>"
+            f"<td>{_esc(f.category.value)}</td><td>{_esc(f.reason)}</td></tr>"
             for f in pii_findings
         )
         raw_sections.append(
@@ -487,7 +494,7 @@ def render_audit_html(
             )
         )
     if insights:
-        raw_sections.append(("Agentic insights", f'<div class="insights">{insights}</div>'))
+        raw_sections.append(("Agentic insights", f'<div class="insights">{_esc(insights)}</div>'))
 
     return render_report_html(
         title=title,
