@@ -16,7 +16,8 @@ def sqlite_db_path(tmp_path: Path) -> Path:
     """Build a small e-commerce schema: 5 customers, 12 orders, deliberate NULLs."""
     path = tmp_path / "shop.sqlite"
     connection = sqlite3.connect(path)
-    connection.executescript("""
+    connection.executescript(
+        """
         CREATE TABLE customers (
             id INTEGER PRIMARY KEY,
             name TEXT,
@@ -53,7 +54,8 @@ def sqlite_db_path(tmp_path: Path) -> Path:
             id INTEGER PRIMARY KEY,
             gauge REAL
         );
-        """)
+        """
+    )
     connection.commit()
     connection.close()
     return path
