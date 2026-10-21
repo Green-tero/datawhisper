@@ -1,9 +1,8 @@
 name: DataWhisper Data Audit
 
-# Autonomous PR auditor: whenever a pull request touches SQL assets, migrations
-# or embedded database files, DataWhisper computes schema drift, optional query
-# benchmarks and (when a GEMINI_API_KEY secret is configured) agentic data
-# insights, then upserts a sticky executive report on the PR conversation.
+# Autonomous PR governor. On pull requests that touch SQL assets, migrations or
+# embedded/columnar datasets it computes schema drift, flags PII exposure in new
+# columns, detects query-plan regressions and upserts one sticky report.
 on:
   pull_request:
     paths:
@@ -11,6 +10,9 @@ on:
       - "**.sqlite"
       - "**.sqlite3"
       - "**.duckdb"
+      - "**.parquet"
+      - "**.jsonl"
+      - "**.ndjson"
       - "migrations/**"
       - "db/**"
       - "seeds/**"
@@ -25,7 +27,7 @@ concurrency:
 
 jobs:
   audit:
-    name: Autonomous data & schema audit
+    name: Zero-trust data & schema audit
     runs-on: ubuntu-latest
     steps:
       - name: Check out full history (base and head revisions)
@@ -39,16 +41,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install DataWhisper
-        run: pip install -e ".[duckdb]"
+        run: pip install -e ".[duckdb,arrow]"
 
-      - name: Run autonomous audit
+      - name: Run governance audit (headless)
         env:
           DATAWHISPER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional: enables the agentic insight layer. Without it the audit
-          # still runs fully deterministic (drift + benchmarks only).
+          # Optional: enables the agentic insight layer. Without it, the audit
+          # still runs fully deterministic (drift + PII + plan benchmarks).
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Stable salt keeps hashed PII pseudonyms consistent across runs.
+          DW_PII_SALT: ${{ secrets.DW_PII_SALT }}
         run: |
           datawhisper audit \
+            --ci-audit \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --base-ref "${{ github.base_ref }}" \

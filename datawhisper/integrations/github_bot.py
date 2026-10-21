@@ -1,20 +1,13 @@
-"""GitHub REST integration: schema drift, query benchmarks and sticky PR reports.
+"""GitHub PR governance: schema drift, PII exposure, plan regressions, sticky reports.
 
-The bot implements the "auditor" persona of DataWhisper. On every relevant
-pull request it:
+The bot is deliberately conservative about what it publishes. It never posts
+row data, and PII findings are reported at column level only (table, column,
+category) so the comment itself cannot become a disclosure channel. All model
+output is additionally scrubbed before formatting.
 
-1. Fetches changed ``.sql`` files at the base and head revisions.
-2. Parses ``CREATE TABLE`` statements with ``sqlglot`` and computes column
-   level drift (added / removed / type-changed, plus whole-table changes).
-3. Optionally benchmarks a fixed query suite against baseline and candidate
-   databases.
-4. Upserts a *sticky* comment (found via an HTML anchor marker) so repeated
-   pushes update one comment instead of flooding the conversation.
-
-Rendering note: GitHub strips ``<script>`` from comments, so interactive
-Plotly charts cannot be embedded inline. The comment therefore carries
-unicode bar visualizations plus a link to the interactive HTML artifact
-uploaded by the workflow; the full dashboard remains available offline.
+Rendering constraints drive the design: GitHub strips ``<script>``, so charts
+are unicode bars plus links to the uploaded Plotly artifact, and long sections
+are collapsed inside ``<details>`` to keep the conversation readable.
 """
 
 from __future__ import annotations
@@ -29,11 +22,12 @@ from pydantic import BaseModel, Field
 from sqlglot import exp
 
 from datawhisper.core.database import ExecutionEngine
+from datawhisper.core.models import PlanInfo
+from datawhisper.core.privacy import PiiCategory, PrivacyScrubber, column_category
 
-#: Invisible anchor that makes the audit comment findable and updatable.
 COMMENT_MARKER = "<!-- datawhisper:audit -->"
-
 _GITHUB_API_VERSION = "2022-11-28"
+_MAX_COMMENT_CHARS = 60_000
 
 
 class GitHubAPIError(RuntimeError):
@@ -45,7 +39,7 @@ class GitHubAPIError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Schema drift detection
+# Schema drift
 # ---------------------------------------------------------------------------
 class ColumnChange(BaseModel):
     column: str
@@ -75,14 +69,32 @@ class DriftReport(BaseModel):
     def has_changes(self) -> bool:
         return bool(self.tables or self.added_tables or self.dropped_tables)
 
+    @property
+    def column_changes(self) -> int:
+        return sum(
+            len(t.added_columns) + len(t.removed_columns) + len(t.type_changes) for t in self.tables
+        )
+
+
+class PiiExposure(BaseModel):
+    """Column-level PII finding; never contains sampled values."""
+
+    table: str
+    column: str
+    category: PiiCategory
+    reason: str = "new column"
+
+
+class PlanRegression(BaseModel):
+    label: str
+    kind: str
+    detail: str
+    baseline: str = ""
+    candidate: str = ""
+
 
 def _extract_tables(sql_text: str) -> tuple[dict[str, dict[str, str]], list[str]]:
-    """Parse CREATE TABLE DDL into ``{table: {column: normalized_type}}``.
-
-    Statements that fail to parse (dialect-specific tooling, procedural
-    blocks) are collected instead of crashing the audit; the report surfaces
-    them so a human can review what the automated diff skipped.
-    """
+    """Parse CREATE TABLE DDL into ``{table: {column: normalized_type}}``."""
     tables: dict[str, dict[str, str]] = {}
     errors: list[str] = []
     try:
@@ -105,7 +117,7 @@ def _extract_tables(sql_text: str) -> tuple[dict[str, dict[str, str]], list[str]
 
 
 def compute_drift(old_sql: str, new_sql: str, source: str = "") -> DriftReport:
-    """Diff two migration snapshots at the column level."""
+    """Diff two migration snapshots at column level."""
     old_tables, old_errors = _extract_tables(old_sql)
     new_tables, new_errors = _extract_tables(new_sql)
     report = DriftReport(parse_errors=old_errors + new_errors)
@@ -120,10 +132,12 @@ def compute_drift(old_sql: str, new_sql: str, source: str = "") -> DriftReport:
         drift = TableDrift(table=name, source=source)
         drift.added_columns = sorted(set(new_cols) - set(old_cols))
         drift.removed_columns = sorted(set(old_cols) - set(new_cols))
-        for col in sorted(set(old_cols) & set(new_cols)):
-            if old_cols[col] != new_cols[col]:
+        for column in sorted(set(old_cols) & set(new_cols)):
+            if old_cols[column] != new_cols[column]:
                 drift.type_changes.append(
-                    ColumnChange(column=col, old_type=old_cols[col], new_type=new_cols[col])
+                    ColumnChange(
+                        column=column, old_type=old_cols[column], new_type=new_cols[column]
+                    )
                 )
         if drift.has_changes:
             report.tables.append(drift)
@@ -131,13 +145,12 @@ def compute_drift(old_sql: str, new_sql: str, source: str = "") -> DriftReport:
 
 
 def merge_drifts(reports: Sequence[DriftReport]) -> DriftReport:
-    """Combine per-file drift reports into one PR-level report."""
     merged = DriftReport()
     seen: set[str] = set()
     for report in reports:
         for table in report.tables:
             if table.table in seen:
-                continue  # first occurrence wins; migrations are ordered anyway
+                continue
             seen.add(table.table)
             merged.tables.append(table)
         merged.added_tables.extend(t for t in report.added_tables if t not in merged.added_tables)
@@ -148,8 +161,38 @@ def merge_drifts(reports: Sequence[DriftReport]) -> DriftReport:
     return merged
 
 
+def analyze_pii_exposure(old_sql: str, new_sql: str) -> list[PiiExposure]:
+    """Flag newly introduced columns whose names imply sensitive data.
+
+    Covers brand-new tables (every column is new) and added columns on
+    existing tables. Renames surface as one removed plus one added column, so
+    they are covered without special casing.
+    """
+    old_tables, _ = _extract_tables(old_sql)
+    new_tables, _ = _extract_tables(new_sql)
+    findings: list[PiiExposure] = []
+
+    for table, columns in sorted(new_tables.items()):
+        previous = old_tables.get(table, {})
+        for column in sorted(columns):
+            if column in previous:
+                continue
+            category = column_category(column)
+            if category is None:
+                continue
+            findings.append(
+                PiiExposure(
+                    table=table,
+                    column=column,
+                    category=category,
+                    reason="new table" if table not in old_tables else "new column",
+                )
+            )
+    return findings
+
+
 # ---------------------------------------------------------------------------
-# Query benchmarks
+# Benchmarks and plan regressions
 # ---------------------------------------------------------------------------
 class BenchmarkResult(BaseModel):
     label: str
@@ -163,7 +206,7 @@ class BenchmarkResult(BaseModel):
 
 
 def parse_benchmark_file(text: str) -> list[tuple[str, str]]:
-    """Parse a benchmark suite file: blank-line separated blocks, ``-- label: x`` headers."""
+    """Parse blank-line separated blocks with optional ``-- label: x`` headers."""
     queries: list[tuple[str, str]] = []
     label: str | None = None
     lines: list[str] = []
@@ -191,10 +234,65 @@ def parse_benchmark_file(text: str) -> list[tuple[str, str]]:
     return queries
 
 
+def compare_plans(
+    label: str, baseline: PlanInfo | None, candidate: PlanInfo | None
+) -> list[PlanRegression]:
+    """Detect the regressions a reviewer actually cares about.
+
+    The checks are intentionally narrow: a lost index that becomes a full
+    scan, a large growth in scanned rows, and a newly introduced cartesian
+    product. Broader "plan changed" noise would train reviewers to ignore the
+    bot.
+    """
+    if baseline is None or candidate is None:
+        return []
+    regressions: list[PlanRegression] = []
+
+    baseline_indexed = {node.table for node in baseline.nodes if node.node_type == "INDEX_SCAN"}
+    candidate_scans = {node.table for node in candidate.full_scans}
+    lost = sorted(table for table in baseline_indexed & candidate_scans if table)
+    for table in lost:
+        regressions.append(
+            PlanRegression(
+                label=label,
+                kind="index_dropped",
+                detail=f"`{table}` moved from index lookup to sequential scan",
+                baseline="index scan",
+                candidate="sequential scan",
+            )
+        )
+
+    baseline_rows = baseline.estimated_scan_rows
+    candidate_rows = candidate.estimated_scan_rows
+    if baseline_rows > 0 and candidate_rows > baseline_rows * 2 and candidate_rows > 1000:
+        regressions.append(
+            PlanRegression(
+                label=label,
+                kind="scan_growth",
+                detail=(
+                    f"estimated scanned rows grew from {baseline_rows:.0f} "
+                    f"to {candidate_rows:.0f}"
+                ),
+                baseline=f"{baseline_rows:.0f} rows",
+                candidate=f"{candidate_rows:.0f} rows",
+            )
+        )
+
+    if candidate.cross_join and not baseline.cross_join:
+        regressions.append(
+            PlanRegression(
+                label=label,
+                kind="cartesian_product",
+                detail="candidate plan introduces a cross product",
+                baseline="no cross product",
+                candidate="cross product",
+            )
+        )
+    return regressions
+
+
 def _best_of(engine: ExecutionEngine, sql: str, repeats: int) -> float:
-    """Minimum elapsed time across repeats (dampens scheduler noise)."""
-    timings = [engine.execute(sql, validate=True).elapsed_ms for _ in range(max(1, repeats))]
-    return min(timings)
+    return min(engine.execute(sql, validate=True).elapsed_ms for _ in range(max(1, repeats)))
 
 
 def run_benchmarks(
@@ -205,15 +303,26 @@ def run_benchmarks(
     repeats: int = 3,
     regression_factor: float = 1.25,
     min_delta_ms: float = 5.0,
-) -> list[BenchmarkResult]:
-    """Benchmark identical SQL on two snapshots and flag performance regressions."""
+) -> tuple[list[BenchmarkResult], list[PlanRegression]]:
+    """Time identical SQL on two snapshots and compare their plans."""
     results: list[BenchmarkResult] = []
+    regressions: list[PlanRegression] = []
     for label, sql in queries:
         try:
+            baseline_plan, _ = baseline.explain(sql)
+            candidate_plan, _ = candidate.explain(sql)
+            regressions.extend(compare_plans(label, baseline_plan, candidate_plan))
             baseline_ms = _best_of(baseline, sql, repeats)
             candidate_ms = _best_of(candidate, sql, repeats)
         except Exception as exc:
             results.append(BenchmarkResult(label=label, sql=sql, error=str(exc)))
+            regressions.append(
+                PlanRegression(
+                    label=label,
+                    kind="broken_query",
+                    detail=f"query failed on a snapshot: {exc}",
+                )
+            )
             continue
         delta = candidate_ms - baseline_ms
         delta_pct = (delta / baseline_ms * 100.0) if baseline_ms > 0 else None
@@ -231,15 +340,13 @@ def run_benchmarks(
                 regression=regression,
             )
         )
-    return results
+    return results, regressions
 
 
 # ---------------------------------------------------------------------------
 # Markdown rendering
 # ---------------------------------------------------------------------------
 def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
-    """Render a GitHub-flavored markdown table, escaping pipes in cells."""
-
     def cell(value: str) -> str:
         return str(value).replace("|", "\\|").replace("\n", " ")
 
@@ -250,103 +357,177 @@ def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str
 
 
 def unicode_bar(value: float, maximum: float, width: int = 10) -> str:
-    """Inline latency bar; the only chart form GitHub markdown renders reliably."""
     if maximum <= 0:
-        return "`" * 0 + "░" * width
+        return "░" * width
     filled = round(width * max(0.0, min(value / maximum, 1.0)))
     return "█" * filled + "░" * (width - filled)
+
+
+def _badge(label: str, count: int) -> str:
+    icon = "🟢" if count == 0 else "🔴"
+    return f"{icon} **{label}:** {count}"
 
 
 def format_audit_report(
     *,
     drift: DriftReport | None = None,
+    pii: Sequence[PiiExposure] | None = None,
     benchmarks: Sequence[BenchmarkResult] | None = None,
+    plan_regressions: Sequence[PlanRegression] | None = None,
     insights: str | None = None,
     pr_number: int | None = None,
     base_ref: str = "",
     head_ref: str = "",
     artifact_url: str | None = None,
     generated_at: datetime | None = None,
+    scrubber: PrivacyScrubber | None = None,
 ) -> str:
-    """Compose the full PR comment, anchored by the sticky marker."""
+    """Compose the sticky governance comment with collapsed detail sections."""
     now = (generated_at or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M UTC")
-    lines: list[str] = [COMMENT_MARKER, "## 📊 DataWhisper Audit Report", ""]
+    pii_findings = list(pii or [])
+    regressions = list(plan_regressions or [])
+    bench_list = list(benchmarks or [])
+    drift = drift or DriftReport()
 
-    context_bits = [f"**PR #{pr_number}**" if pr_number else "**Local audit**"]
+    benchmark_regressions = sum(1 for b in bench_list if b.regression)
+    blocking = bool(pii_findings) or bool(regressions) or benchmark_regressions > 0
+
+    lines: list[str] = [COMMENT_MARKER, "## 🛡️ DataWhisper Governance Report", ""]
+    context = [f"**PR #{pr_number}**" if pr_number else "**Local audit**"]
     if base_ref and head_ref:
-        context_bits.append(f"`{base_ref}…{head_ref}`")
-    context_bits.append(f"generated {now}")
-    lines.append(" • ".join(context_bits))
+        context.append(f"`{base_ref}…{head_ref}`")
+    context.append(f"generated {now}")
+    lines.append(" • ".join(context))
     lines.append("")
 
-    # --- Schema drift -------------------------------------------------
-    lines.append("### 🧬 Schema Drift")
-    if drift is None or not drift.has_changes:
-        lines.append("✅ No schema drift detected in `CREATE TABLE` statements.")
+    verdict = (
+        "🔴 **Review required** — sensitive columns, plan regressions or latency drift detected."
+        if blocking
+        else "🟢 **No blocking findings** — schema, privacy and plan checks passed."
+    )
+    lines.append(f"> {verdict}")
+    lines.append("")
+    lines.append(
+        " · ".join(
+            [
+                _badge("drifted tables", len(drift.tables) + len(drift.added_tables)),
+                _badge("PII columns", len(pii_findings)),
+                _badge("plan regressions", len(regressions)),
+                _badge("latency regressions", benchmark_regressions),
+            ]
+        )
+    )
+    lines.append("")
+
+    # --- Drift ---------------------------------------------------------
+    lines.append("<details>")
+    lines.append(
+        f"<summary><b>🧬 Schema drift</b> ({drift.column_changes} column changes)</summary>"
+    )
+    lines.append("")
+    if not drift.has_changes:
+        lines.append("No schema drift detected in `CREATE TABLE` statements.")
     else:
         if drift.added_tables:
-            lines.append("🆕 **New tables:** " + ", ".join(f"`{t}`" for t in drift.added_tables))
+            lines.append("**New tables:** " + ", ".join(f"`{t}`" for t in drift.added_tables))
         if drift.dropped_tables:
-            lines.append(
-                "🗑️ **Dropped tables:** " + ", ".join(f"`{t}`" for t in drift.dropped_tables)
-            )
+            lines.append("**Dropped tables:** " + ", ".join(f"`{t}`" for t in drift.dropped_tables))
         for table in drift.tables:
             lines.append("")
             origin = f" (`{table.source}`)" if table.source else ""
             lines.append(f"#### `{table.table}`{origin}")
             rows: list[list[str]] = []
-            rows.extend(["+ added", f"`{c}`", ""] for c in table.added_columns)
-            rows.extend(["- removed", f"`{c}`", ""] for c in table.removed_columns)
+            rows.extend(["added", f"`{c}`", ""] for c in table.added_columns)
+            rows.extend(["removed", f"`{c}`", ""] for c in table.removed_columns)
             rows.extend(
-                ["~ changed", f"`{c.column}`", f"`{c.old_type}` -> `{c.new_type}`"]
+                ["changed", f"`{c.column}`", f"`{c.old_type}` -> `{c.new_type}`"]
                 for c in table.type_changes
             )
             lines.append(markdown_table(["Change", "Column", "Details"], rows))
         if drift.parse_errors:
             lines.append("")
             lines.append(
-                f"⚠️ {len(drift.parse_errors)} statement(s) could not be parsed and "
-                "were excluded from the automated diff."
+                f"⚠️ {len(drift.parse_errors)} statement(s) could not be parsed and were "
+                "excluded from the automated diff."
             )
     lines.append("")
+    lines.append("</details>")
+    lines.append("")
 
-    # --- Benchmarks ----------------------------------------------------
-    lines.append("### ⏱️ Query Benchmarks")
-    if not benchmarks:
-        lines.append("_No benchmark suite configured for this audit._")
+    # --- PII -----------------------------------------------------------
+    lines.append("<details>")
+    lines.append(f"<summary><b>🔐 PII exposure risk</b> ({len(pii_findings)} columns)</summary>")
+    lines.append("")
+    if not pii_findings:
+        lines.append("No newly introduced columns match sensitive-data patterns.")
     else:
-        worst = max((b.candidate_ms for b in benchmarks if b.candidate_ms is not None), default=0.0)
-        bench_rows: list[list[str]] = []
-        for bench in benchmarks:
-            if bench.error is not None:
-                bench_rows.append([f"`{bench.label}`", "—", "—", f"❌ {bench.error}"])
-                continue
-            assert (
-                bench.baseline_ms is not None
-                and bench.candidate_ms is not None
-                and bench.delta_ms is not None
+        lines.append(
+            "These columns were introduced by this PR. DataWhisper redacts matching values "
+            "at query time, but the storage and retention decision belongs to the reviewers."
+        )
+        lines.append("")
+        lines.append(
+            markdown_table(
+                ["Table", "Column", "Category", "Origin"],
+                [
+                    [f"`{f.table}`", f"`{f.column}`", f"`{f.category.value}`", f.reason]
+                    for f in pii_findings
+                ],
             )
-            delta_txt = f"{bench.delta_ms:+.1f} ms"
+        )
+    lines.append("")
+    lines.append("</details>")
+    lines.append("")
+
+    # --- Plans + benchmarks -------------------------------------------
+    lines.append("<details>")
+    lines.append(
+        f"<summary><b>⏱️ Query plans & benchmarks</b> "
+        f"({len(regressions)} plan regressions)</summary>"
+    )
+    lines.append("")
+    if not bench_list and not regressions:
+        lines.append("No benchmark suite configured for this audit.")
+    if regressions:
+        lines.append(
+            markdown_table(
+                ["Query", "Signal", "Detail"],
+                [[f"`{r.label}`", f"`{r.kind}`", r.detail] for r in regressions],
+            )
+        )
+        lines.append("")
+    if bench_list:
+        worst = max((b.candidate_ms for b in bench_list if b.candidate_ms is not None), default=0.0)
+        bench_rows: list[list[str]] = []
+        for bench in bench_list:
+            if bench.error is not None:
+                bench_rows.append([f"`{bench.label}`", "—", "—", f"error: {bench.error}"])
+                continue
+            assert bench.baseline_ms is not None and bench.candidate_ms is not None
+            assert bench.delta_ms is not None
+            delta = f"{bench.delta_ms:+.1f} ms"
             if bench.delta_pct is not None:
-                delta_txt += f" ({bench.delta_pct:+.1f}%)"
-            flag = "⚠️ regression" if bench.regression else "✅"
+                delta += f" ({bench.delta_pct:+.1f}%)"
             bench_rows.append(
                 [
                     f"`{bench.label}`",
                     f"{bench.baseline_ms:.1f} ms",
                     f"{bench.candidate_ms:.1f} ms ` {unicode_bar(bench.candidate_ms, worst)} `",
-                    f"{delta_txt} {flag}",
+                    f"{delta} {'⚠️' if bench.regression else '✅'}",
                 ]
             )
         lines.append(markdown_table(["Query", "Baseline", "Candidate", "Δ / verdict"], bench_rows))
     lines.append("")
+    lines.append("</details>")
+    lines.append("")
 
-    # --- Agentic insights ----------------------------------------------
+    # --- Insights ------------------------------------------------------
     if insights:
-        lines.append("### 🤖 Agentic Insights")
-        lines.append("<details><summary>Model-generated analysis (verify before merging)</summary>")
+        scrubbed = scrubber.scrub_text(insights)[0] if scrubber else insights
+        lines.append("<details>")
+        lines.append("<summary><b>🤖 Agentic insights</b> (verify before merging)</summary>")
         lines.append("")
-        lines.append(insights.strip())
+        lines.append(scrubbed.strip())
         lines.append("")
         lines.append("</details>")
         lines.append("")
@@ -355,11 +536,11 @@ def format_audit_report(
         lines.append(f"📈 [Interactive Plotly report]({artifact_url})")
         lines.append("")
     lines.append(
-        "---\n<sub>Generated by "
-        "[DataWhisper](https://github.com/datawhisper/datawhisper) • "
-        "read-only sandboxed analysis • all SQL validated at AST level</sub>"
+        "---\n<sub>Read-only sandboxed analysis • AST-validated SQL • results PII-scrubbed "
+        "before reporting</sub>"
     )
-    return "\n".join(lines)
+    report = "\n".join(lines)
+    return report[:_MAX_COMMENT_CHARS]
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +554,7 @@ class PrFile(BaseModel):
 
 
 class GitHubClient:
-    """Thin, dependency-light REST client for PR auditing."""
+    """Thin REST client for the governance bot."""
 
     def __init__(
         self,
@@ -427,14 +608,12 @@ class GitHubClient:
             raise GitHubAPIError(response.status_code, str(message))
         return response
 
-    # --- Reads ---------------------------------------------------------
     def list_pr_files(self, pr_number: int) -> list[PrFile]:
         response = self._request(
             "GET",
             f"{self._api_base}/repos/{self._repo}/pulls/{pr_number}/files",
             params={"per_page": "100"},
         )
-        payload = response.json()
         return [
             PrFile(
                 filename=item["filename"],
@@ -442,15 +621,11 @@ class GitHubClient:
                 additions=item.get("additions", 0),
                 deletions=item.get("deletions", 0),
             )
-            for item in payload
+            for item in response.json()
         ]
 
     def get_file_content(self, path: str, ref: str) -> str:
-        """Fetch raw file content at a ref; absent files yield an empty baseline.
-
-        A 404 is expected and meaningful: files newly added by the PR have no
-        base revision, so the drift baseline is empty rather than an error.
-        """
+        """Fetch raw content at a ref; 404 yields an empty baseline (new files)."""
         try:
             response = self._request(
                 "GET",
@@ -466,12 +641,13 @@ class GitHubClient:
 
     def list_pr_comments(self, pr_number: int) -> list[dict[str, Any]]:
         response = self._request(
-            "GET", f"{self._api_base}/repos/{self._repo}/issues/{pr_number}/comments"
+            "GET",
+            f"{self._api_base}/repos/{self._repo}/issues/{pr_number}/comments",
+            params={"per_page": "100"},
         )
         payload = response.json()
         return payload if isinstance(payload, list) else []
 
-    # --- Writes --------------------------------------------------------
     def create_pr_comment(self, pr_number: int, body: str) -> None:
         self._request(
             "POST",
@@ -487,16 +663,9 @@ class GitHubClient:
         )
 
     def upsert_sticky_comment(self, pr_number: int, body: str, marker: str = COMMENT_MARKER) -> str:
-        """Update the existing audit comment or create it; returns the outcome.
-
-        Stickiness keeps the PR conversation clean: every push to the PR
-        revises the same comment (anchored by ``marker``) instead of adding
-        a new one.
-        """
         for comment in self.list_pr_comments(pr_number):
             if marker in str(comment.get("body", "")):
-                comment_id = int(comment["id"])
-                self.update_pr_comment(comment_id, body)
+                self.update_pr_comment(int(comment["id"]), body)
                 return "updated"
         self.create_pr_comment(pr_number, body)
         return "created"

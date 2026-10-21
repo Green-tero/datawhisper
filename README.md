@@ -1,207 +1,280 @@
-# DataWhisper
+# DataWhisper v2.0
 
-Ask questions about your data in plain language, and get a bot that reviews database changes on every pull request.
+Zero-trust agentic data analysis and CI/CD database governance. Ask questions about SQLite, DuckDB, PostgreSQL, Parquet or JSONL data — and get a bot that reviews schema, privacy and query-plan changes on every pull request.
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-**Language / زبان:** click a section below to open it. English is open by default.
+**Language / زبان:** open a section below. English is open by default.
 
 <details open>
 <summary><b>🇬🇧 &nbsp;English</b></summary>
 
 <br>
 
-**Contents:** [What it does](#what-it-does) · [Features](#features) · [Quickstart](#quickstart) · [Try it in 60 seconds](#try-it-in-60-seconds) · [How it fits together](#how-it-fits-together) · [Commands](#commands) · [GitHub Action](#using-it-as-a-github-action) · [Configuration](#configuration) · [Development](#development) · [License](#license)
+**Contents:** [What it does](#what-it-does) · [What's new in v2](#whats-new-in-v2) · [Architecture](#architecture) · [Security model](#security-model) · [Engines](#supported-engines) · [Quickstart](#quickstart) · [60-second demo](#try-it-in-60-seconds) · [Commands](#commands) · [GitHub Action](#using-it-as-a-github-action) · [Configuration](#configuration) · [Benchmarks](#benchmarks) · [Development](#development) · [License](#license)
 
 ## What it does
 
-DataWhisper has two jobs.
+**1. A local analysis tool.** Ask a question about a dataset. DataWhisper prunes a large schema down to the relevant tables and join paths, writes SQL, runs it behind an AST sandbox and a cost gate, repairs its own errors, and scrubs sensitive values before showing you anything.
 
-**1. A local tool for exploring data.** You get a command-line app (built with `typer` and `rich`) and a dark-mode Plotly dashboard. You ask a question about a SQLite, DuckDB or CSV dataset, and DataWhisper writes the SQL, runs it, and fixes its own mistakes if the query fails.
+**2. A pull-request governor.** On a PR that touches SQL, migrations or data files, the bot reports column-level schema drift, flags newly introduced PII columns, detects plan regressions (an index lost to a sequential scan) and latency drift, then updates one sticky comment. A full interactive Plotly report is uploaded as an artifact.
 
-**2. A GitHub bot for pull requests.** When a PR changes your database schema, the bot works out what changed (added, removed or retyped columns, dropped tables) and how query speed moved between the old and new versions. It posts the result as a single comment that gets updated on every push, so your PR thread stays clean. A full interactive report is attached as an artifact.
+No LangChain, no LlamaIndex. The agent is a small ReAct loop in plain Python; every model-produced statement is checked as an AST and passed through an EXPLAIN-based cost gate before execution.
 
-There is no LangChain or LlamaIndex here. The agent is a small ReAct loop written in plain Python. Every SQL statement the model produces is checked by an AST-level sandbox (using `sqlglot`) before it gets near a database driver.
+## What's new in v2
 
-## Features
+| Area | v1.0 | v2.0 |
+| --- | --- | --- |
+| Large schemas | full DDL in the prompt | BM25 retrieval + FK graph + Dijkstra join paths, token-budgeted |
+| Data movement | row lists | native Arrow tables from DuckDB; lazy materialization elsewhere |
+| Engines | SQLite, DuckDB, CSV | + PostgreSQL, Parquet, JSONL/NDJSON (vectorized JSON) |
+| Cost control | timeout + row cap | + EXPLAIN gate: rejects cartesian joins, forces LIMIT on large scans |
+| Privacy | — | PII detection and redaction before LLM, terminal and PR comment |
+| PR audit | drift + latency | + PII exposure and query-plan regressions |
+| Dashboards | inventory charts | auto-detected timeseries, distributions, correlations, plan view, redaction badges |
 
-- **Self-correcting SQL.** If the database returns an error, the model sees it and repairs the query, up to 3 times. A run always ends with a clear result or a clear failure report.
-- **Strict SQL sandbox.** Three layers of checks. When in doubt, a query is rejected. Only one read-only statement can ever reach the database.
-- **One engine for all sources.** SQLite, DuckDB and CSV share the same interface, with a timeout per query, a row cap, and safe cancellation in a separate thread.
-- **Column-level schema drift.** Added, removed and type-changed columns, plus dropped tables, read straight from `CREATE TABLE` statements.
-- **Benchmarks with a merge gate.** Best-of-N timing on the baseline and the candidate. Add `--fail-on-regression` to block a slow change from merging.
-- **One comment per PR.** The bot edits its own comment instead of posting a new one each time.
-- **Dark-mode dashboard.** A standalone HTML file with KPI cards, an execution timeline, and drift and benchmark charts.
-- **Works without an LLM.** With no API key, the audit still produces the drift and benchmark reports.
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        CLI["CLI · typer + rich"]
+        DASH["Dashboard · standalone Plotly HTML"]
+        GHA["GitHub Actions runner"]
+    end
+
+    subgraph Core["DataWhisper Core"]
+        GRAPH["schema_graph.py<br/>BM25 retrieval<br/>Dijkstra join paths"]
+        AGENT["agent.py<br/>4-stage ReAct loop"]
+        SEC["security.py<br/>AST sandbox<br/>cost gatekeeper"]
+        PRIV["privacy.py<br/>PII detection<br/>redaction"]
+        DB["database.py<br/>SQLite · DuckDB · Postgres<br/>Parquet · JSONL · Arrow"]
+    end
+
+    LLM{"Gemini / OpenAI"}
+    GH["GitHub REST API<br/>sticky governance comment"]
+
+    CLI --> AGENT
+    GHA --> AGENT
+    AGENT --> GRAPH
+    AGENT --> SEC
+    SEC --> DB
+    DB --> PRIV
+    PRIV --> AGENT
+    AGENT <--> LLM
+    GHA --> SEC
+    GHA --> GH
+```
+
+### The four-stage pipeline
+
+1. **Sub-schema retrieval.** Tables are scored with Okapi BM25 over table and column identifiers. The top-K seeds are connected with a Prim-style expansion over foreign-key edges (multi-source Dijkstra), and wide tables are compressed to query-relevant columns plus primary/foreign keys. Only that sub-schema enters the prompt, within a token budget.
+2. **Query generation.** The model writes SQL in the engine's dialect. `transpile_sql` validates under the source dialect *before* transpiling to another target, so cross-dialect parsing differences cannot smuggle blocked constructs.
+3. **Guardrails and execution.** The AST sandbox runs first; the planner is consulted next; then the statement executes under a wall-clock timeout with a row cap in a single-worker pool.
+4. **Synthesis.** Results are scrubbed, then summarized. Every ReAct turn is retained as telemetry for the dashboard and CI logs.
+
+## Security model
+
+### AST sandbox (`core/security.py`)
+
+| Layer | Enforcement |
+| --- | --- |
+| Lexical | No semicolons and no comment tokens. Strict by design: applies even inside string literals, removing a class of parser-differential bypasses. |
+| Structural | Exactly one statement; root must be `SELECT`, a set operation, a subquery, or `EXPLAIN` — a whitelist, not a blacklist. |
+| Semantic | Blocks mutating nodes anywhere in the tree (including under a CTE), file readers (`read_csv`, `read_parquet`, …), extension loaders, `getenv`, `COPY`, `INSTALL`, `ATTACH`, PostgreSQL server-side readers (`pg_read_file`, `dblink`, `pg_sleep`), and catalog-qualified escapes (`secret_db.main.t`). |
+
+Dangerous DuckDB table functions parse to *typed* nodes (`read_csv` → `ReadCSV`) whose `.name` is the argument, so the guard matches both the anonymous call name and the snake-cased node class.
+
+### Cost gatekeeper
+
+Before execution, `EXPLAIN`/`EXPLAIN QUERY PLAN` is normalized into a common plan model.
+
+- **Cartesian joins are rejected.** Detection is AST-based (tables combined without any connecting predicate in that query scope), so it works on every engine, with a planner cross-check for `CROSS_PRODUCT`.
+- **Large scans are paginated.** If the estimated scan exceeds `DW_MAX_SCAN_ROWS` and no tighter bound exists, a `LIMIT` is injected and the rewrite is re-validated.
+- **Already-bounded scans are allowed** with an explicit note, because refusing a `LIMIT 10` query would be surprising.
+- **Planner failures** follow `DW_PLAN_FAILURE_POLICY` (`allow_with_budget` by default, because the hard timeout and row cap remain in force; set `reject` for fail-closed behavior).
+
+### PII scrubber (`core/privacy.py`)
+
+Detection combines column semantics (a column named `email` is sensitive even when one sample does not match) with value patterns: emails, Luhn-validated card numbers, SSNs, formatted phone numbers, provider API keys (`sk-…`, `AKIA…`, `ghp_…`, `AIza…`) and JWTs.
+
+| Mode | Output example |
+| --- | --- |
+| `hash` (default) | `email_9f2c…` — HMAC-SHA256 with `DW_PII_SALT`, stable across CI runs |
+| `mask` | `a***@example.com`, `**** **** **** 1111` |
+| `tokenize` | `<EMAIL:1>` — stable within one run |
+| `redact` | `[REDACTED:EMAIL]` |
+
+Invariants: scrubbing happens inside the execution engine, so every consumer (LLM context, terminal, dashboard, PR comment) receives scrubbed rows; the telemetry report contains counts and column names only, never values; `DW_PII_ALLOW_COLUMNS` is the single explicit opt-out.
+
+> Honest trade-off: for Parquet/JSONL sources the engine registers a DuckDB view, which is evaluated lazily, so DuckDB filesystem access cannot be globally disabled without materializing the file. Zero-trust is enforced one level up: user SQL never reaches a file function, and only the engine-registered view is exposed. `.duckdb` files are opened `read_only=True`; SQLite is opened `mode=ro` with `query_only`; PostgreSQL runs in a read-only transaction with `statement_timeout`.
+
+## Supported engines
+
+| Source | Driver | Dialect | Notes |
+| --- | --- | --- | --- |
+| `.sqlite`, `.db`, `.sqlite3` | stdlib `sqlite3` | sqlite | `mode=ro` + `query_only` |
+| `.duckdb` | `duckdb` extra | duckdb | `read_only=True` |
+| `.parquet`, `.pq`, directory | DuckDB view | duckdb | native Arrow transfer |
+| `.jsonl`, `.ndjson` | DuckDB `read_json_auto` | duckdb | vectorized nested extraction |
+| `.csv` | DuckDB, SQLite fallback | duckdb/sqlite | typed ingest when DuckDB absent |
+| `postgres://…` | `psycopg` extra | postgres | read-only transaction, server-side timeout |
 
 ## Quickstart
 
-Requires **Python 3.11 or newer**. DataWhisper is not on PyPI yet, so install it from this repository:
+Requires **Python 3.11+**. DataWhisper is installed from this repository (not on PyPI):
 
 ```bash
 git clone https://github.com/Green-tero/datawhisper.git
 cd datawhisper
 
-# pip
-pip install -e ".[duckdb,llm]"        # or: poetry install --with dev --extras duckdb
-
-# optional: enables the natural-language layer
-export GEMINI_API_KEY=...             # or OPENAI_API_KEY=...
+pip install -e ".[duckdb,arrow]"     # add ,postgres and ,llm as needed
+poetry install --with dev --extras "duckdb arrow"   # developer setup
 ```
 
-The `[duckdb]` extra adds DuckDB support, and `[llm]` adds the Gemini and OpenAI SDKs. You can install without either and still use SQLite, CSV, drift detection and benchmarks.
+| Extra | Adds |
+| --- | --- |
+| `duckdb` | DuckDB engine, Parquet and JSONL sources |
+| `arrow` | PyArrow zero-copy transfer (+ Polars conversion) |
+| `postgres` | PostgreSQL driver |
+| `llm` | Gemini and OpenAI SDKs |
+
+```bash
+export GEMINI_API_KEY=...     # or OPENAI_API_KEY=...
+```
 
 ## Try it in 60 seconds
-
-Create a small demo database, then inspect it and render a dashboard. No API key needed for these two steps.
 
 ```bash
 python - <<'PY'
 import sqlite3
 db = sqlite3.connect("demo.sqlite")
 db.executescript("""
-CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, country TEXT);
-CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, amount REAL, status TEXT);
-INSERT INTO customers VALUES (1,'Ada','UK'),(2,'Alan','UK'),(3,'Maryam','IR'),(4,'Grace','US');
-INSERT INTO orders VALUES (1,1,120.5,'paid'),(2,2,NULL,'refunded'),(3,3,75.25,'paid'),(4,4,10.0,'pending');
+CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, email TEXT, country TEXT);
+CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id),
+                     amount REAL, status TEXT, placed_at TEXT);
+INSERT INTO customers VALUES (1,'Ada','ada@example.com','UK'),(2,'Alan','alan@example.com','UK'),
+                             (3,'Maryam','m@example.org','IR'),(4,'Grace',NULL,'US');
+INSERT INTO orders VALUES (1,1,120.5,'paid','2024-05-01'),(2,1,35.0,'paid','2024-05-02'),
+                          (3,2,89.9,'pending','2024-05-03'),(4,2,NULL,'refunded','2024-05-04'),
+                          (5,3,250.0,'paid','2024-05-05'),(6,4,64.0,'pending','2024-05-06');
 """)
 db.commit()
 PY
 
-datawhisper inspect --db demo.sqlite --profile orders.amount
-datawhisper dashboard --db demo.sqlite -o report.html
+# what the model would see — no model call, no SQL executed
+datawhisper inspect --db demo.sqlite --graph "revenue per customer country"
+
+# sandbox + cost verdict for a cartesian join (rejected, non-zero exit)
+datawhisper explain "SELECT * FROM customers, orders" --db demo.sqlite
+
+# auto-detected charts, plan view and redaction badges
+datawhisper dashboard --db demo.sqlite --sql "SELECT * FROM orders" -o report.html
+
+# with an API key: full agentic analysis
+datawhisper ask "which country generates the most refund risk?" --db demo.sqlite
 ```
-
-`inspect` prints the catalog and, for the profiled column, its null ratio, distinct count and most common values. Open `report.html` for the dark-mode dashboard.
-
-With an API key set, you can also ask a question in plain language:
-
-```bash
-datawhisper ask "which customers generate the most refund risk?" --db demo.sqlite
-```
-
-Run `datawhisper --help` to see every command and option.
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    subgraph Clients
-        CLI["CLI · typer + rich"]
-        DASH["Web dashboard · standalone Plotly HTML"]
-        GHA["GitHub Actions runner"]
-    end
-
-    subgraph Core["DataWhisper Core"]
-        SEC["core/security.py<br/>AST SQL sandbox (fail-closed)"]
-        DB["core/database.py<br/>SQLite / DuckDB engines<br/>timeout + row-cap isolation"]
-        AGENT["core/agent.py<br/>zero-framework ReAct loop<br/>self-healing SQL (max 3 repairs)"]
-        PROV{"Provider interface<br/>Gemini · OpenAI · Scripted"}
-    end
-
-    GH["GitHub REST API<br/>sticky PR comments"]
-    REPORT["visualization/dashboard.py<br/>dark-mode executive report"]
-
-    CLI --> AGENT
-    GHA --> AGENT
-    AGENT --> SEC
-    SEC --> DB
-    AGENT <--> PROV
-    AGENT --> REPORT --> DASH
-    GHA --> GH
-    SEC -. "schema drift via sqlglot DDL diff" .-> GH
-```
-
-### How the agent works
-
-The agent lives in `core/agent.py` and goes through four steps.
-
-1. **Look at the data.** The `inspect_schema` and `profile_column` tools show tables, column types, null ratios, distinct counts and the most common values.
-2. **Write the query.** The model writes SQL in the right dialect (SQLite or DuckDB). The sandbox checks its structure before anything runs.
-3. **Run it and fix errors.** The query runs on a read-only connection with a single worker and a timeout. If the driver reports an error, that exact message goes back to the model so it can repair the SQL. After 3 failed repairs, you get a structured failure report.
-4. **Explain the result.** A final `final_answer` step summarizes the findings with real numbers. Every step is kept as an audit trail and shown as an execution timeline.
-
-### Security
-
-The sandbox lives in `core/security.py`. Anything it cannot clearly approve is rejected.
-
-| Layer | What it checks |
-| --- | --- |
-| Lexical | No multiple statements and no comment tokens. This is strict and applies even inside string literals. |
-| Structural | The single AST root must be a `SELECT`, a set operation, or `EXPLAIN`. It is a whitelist, not a blacklist. |
-| Semantic | Blocks `PRAGMA`, `ATTACH`, `COPY`, `INSTALL`, file-reading table functions (`read_csv`, `read_parquet` and similar), `load_extension`, `getenv`, and catalog-qualified escapes such as `secret_db.main.t`. |
 
 ## Commands
 
-| Command | What it does |
+| Command | Purpose |
 | --- | --- |
-| `datawhisper ask "<question>" --db <file>` | Runs the self-correcting agent on a dataset. |
-| `datawhisper inspect --db <file> [--profile table.column]` | Prints the catalog, types, row counts and column statistics. |
-| `datawhisper dashboard --db <file> -o report.html [--question ...]` | Builds the standalone dark-mode dashboard. |
-| `datawhisper audit --repo owner/name --pr N --base-ref main --head-ref SHA` | CI mode: drift, benchmarks and insights, then posts a sticky PR comment. |
-| `datawhisper audit --base-sql old.sql --head-sql new.sql --dry-run` | Offline drift audit of two migration snapshots. |
-| `datawhisper audit ... --baseline-db a.db --candidate-db b.db --bench-file suite.sql` | Adds query benchmarks to any audit. |
+| `datawhisper ask "<q>" --db <src> [--explain-only]` | Agentic analysis. `--explain-only` prints the pruned context and exits. |
+| `datawhisper inspect --db <src> [--profile t.c] [--graph "<q>"]` | Catalog, column statistics, or schema-pruning preview. |
+| `datawhisper explain "<sql>" --db <src>` | Dry run: AST verdict + normalized plan + cost decision. |
+| `datawhisper dashboard --db <src> [-o out.html] [--sql …] [--question …]` | Standalone dark-mode report. |
+| `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | Offline drift + PII audit. |
+| `datawhisper audit --repo o/r --pr N --base-ref main --head-ref SHA --ci-audit` | Headless PR governance; posts a sticky comment. |
+
+Exit codes: `0` success, `1` findings under `--fail-on-regression` / `--fail-on-pii` or a failed agent run, `2` configuration/security/API errors.
 
 ## Using it as a GitHub Action
 
-Copy [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml) into your repository. It is already set up to run on this repo.
-
-There is one optional secret:
+Copy [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml). It triggers on PRs touching `*.sql`, `*.sqlite`, `*.duckdb`, `*.parquet`, `*.jsonl`, `migrations/**`, `db/**`, `seeds/**`.
 
 | Secret | Required | Purpose |
 | --- | --- | --- |
-| `GEMINI_API_KEY` (or `OPENAI_API_KEY`) | No | Turns on the AI insight layer. Without it, audits run drift and benchmarks only. |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | No | Agentic insights. Without it, drift/PII/plan checks still run. |
+| `DW_PII_SALT` | No | Stable hash salt for pseudonyms across CI runs. |
 
-`GITHUB_TOKEN` is provided by Actions automatically, so you don't need to set it up.
+`GITHUB_TOKEN` is provided automatically. The report is one comment marked `<!-- datawhisper:audit -->`, with collapsible sections for drift, PII exposure, plan/benchmark results and insights.
 
-The workflow:
+Plan regression signals are deliberately narrow to avoid alert fatigue: an index lookup that became a sequential scan, a >2× growth in estimated scanned rows above 1,000, a newly introduced cross product, or a query that now fails on one snapshot.
 
-- runs on PRs that touch `*.sql`, `*.sqlite`, `*.sqlite3`, `*.duckdb`, `migrations/**`, `db/**` or `seeds/**`;
-- posts or updates one comment (marked with `<!-- datawhisper:audit -->`) with schema drift tables, benchmark verdicts and text-based latency bars. GitHub strips `<script>` from comments, so the interactive charts are in the uploaded Plotly artifact instead;
-- exits with a non-zero code when you use `--fail-on-regression`, so you can block merges.
-
-> The audit workflow only runs on data-file pull requests, so it stays quiet (and unbadged) on `main`. That is expected.
-
-```yaml
-- run: |
-    datawhisper audit \
-      --repo "${{ github.repository }}" \
-      --pr "${{ github.event.pull_request.number }}" \
-      --base-ref "${{ github.base_ref }}" \
-      --head-ref "${{ github.event.pull_request.head.sha }}" \
-      --fail-on-regression
-  env:
-    DATAWHISPER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-To audit two migration files locally, with no GitHub involved:
-
-```bash
-datawhisper audit --base-sql migrations/V001__old.sql --head-sql migrations/V002__new.sql --dry-run
-```
+> The audit workflow only runs on data-file pull requests, so it stays quiet on `main`. That is expected.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` | none | Provider credentials. Auto-detected in this order: Gemini, then OpenAI. |
-| `DW_LLM_PROVIDER` | auto | `gemini`, `openai` or `none` |
-| `DW_LLM_MODEL` | per provider | For example `gemini-2.0-flash` or `gpt-4o-mini` |
-| `DW_QUERY_TIMEOUT` | `10` | Time limit per statement, in seconds |
-| `DW_MAX_ROWS` | `1000` | Maximum rows returned per query |
-| `DW_MAX_REPAIRS` | `3` | How many times the agent retries a failing query before giving up |
-| `DATAWHISPER_GITHUB_TOKEN` / `GITHUB_TOKEN` | none | Token used to post PR comments in CI |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | none | Provider credentials (Gemini is detected first) |
+| `DW_LLM_PROVIDER`, `DW_LLM_MODEL` | auto | Provider override and model id |
+| `DW_QUERY_TIMEOUT` | `10` | Per-statement wall clock (seconds) |
+| `DW_MAX_ROWS` | `1000` | Hard row cap per result |
+| `DW_MAX_REPAIRS` | `3` | Self-healing attempts before abort |
+| `DW_COST_ENABLED` | `true` | Enable the EXPLAIN gate |
+| `DW_MAX_SCAN_ROWS` | `5000000` | Scan budget before forcing pagination |
+| `DW_AUTO_LIMIT` | `500` | LIMIT injected for oversized scans |
+| `DW_REJECT_CARTESIAN` | `true` | Reject cartesian joins |
+| `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | `allow_with_budget` or `reject` |
+| `DW_PII_ENABLED`, `DW_PII_MODE` | `true`, `hash` | Scrubber switch and mode |
+| `DW_PII_SALT` | local default | HMAC salt; set a secret in CI |
+| `DW_PII_ALLOW_COLUMNS` | empty | Comma-separated columns exempt from scrubbing |
+| `DW_GRAPH_MAX_TABLES` | `6` | Tables retained per question |
+| `DW_GRAPH_MAX_COLUMNS` | `12` | Column cap per table in the prompt |
+| `DW_GRAPH_MAX_TOKENS` | `1500` | Prompt budget for schema context |
+
+## Benchmarks
+
+Measured on the development machine (Windows, Python 3.15, SQLite in memory) at this commit. These are synthetic microbenchmarks, not production throughput claims:
+
+| Operation | Input | Median |
+| --- | --- | --- |
+| Schema retrieval (BM25 + Dijkstra) | 60-table FK chain | **0.72 ms** |
+| AST validation | join + aggregate + LIMIT | **0.39 ms** |
+| PII scrubbing | 10,000 cells across 5 columns | **28.9 ms** |
+| Full test suite | 123 tests | ~1.6 s |
+
+Reproduce the graph number:
+
+```bash
+python - <<'PY'
+import statistics, time
+from tests.conftest import make_large_catalog
+from datawhisper.core.schema_graph import SchemaGraph
+
+graph = SchemaGraph(make_large_catalog(60))
+samples = []
+for _ in range(200):
+    start = time.perf_counter()
+    graph.retrieve("metric value for t42 joined to t7", top_k=6)
+    samples.append((time.perf_counter() - start) * 1000)
+print(f"median {statistics.median(samples):.2f} ms")
+PY
+```
+
+Query-latency regression testing is a separate, repository-specific exercise: provide two database snapshots and a suite of representative queries.
+
+```bash
+datawhisper audit --base-sql schema.sql --head-sql schema.sql \
+  --baseline-db old.sqlite --candidate-db new.sqlite \
+  --bench-file benchmarks/queries.sql --fail-on-regression
+```
 
 ## Development
 
 ```bash
-poetry install --with dev --extras duckdb
-pre-commit install                 # ruff, black and strict mypy
-poetry run pytest -v               # security, self-correction and GitHub bot tests
-poetry run mypy datawhisper        # strict type check
+poetry install --with dev --extras "duckdb arrow"
+pre-commit install
+poetry run pytest -v          # 123 tests
+poetry run ruff check .
+poetry run black --check .
+poetry run mypy datawhisper   # strict
 ```
+
+Test coverage highlights: 22 injection/bypass vectors, cartesian and scan-budget gate behavior, Luhn/SSN/phone/API-key/JWT detection, zero-leak assertions on engine output and profile top values, 60-table BM25 retrieval and 35-hop pathfinding, multi-engine execution (SQLite, DuckDB, Parquet, JSONL), and self-correction after security, cost and driver failures.
 
 ## License
 
@@ -216,32 +289,125 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 <div dir="rtl">
 
-**فهرست:** [این پروژه چه کار می‌کند](#این-پروژه-چه-کار-می‌کند) · [ویژگی‌ها](#ویژگی‌ها) · [راه‌اندازی سریع](#راه-اندازی-سریع) · [در ۶۰ ثانیه امتحان کنید](#در-۶۰-ثانیه-امتحان-کنید) · [اجزا چطور به هم وصل می‌شوند](#اجزا-چطور-به-هم-وصل-می-شوند) · [دستورات](#دستورات) · [اکشن گیت‌هاب](#استفاده-به-عنوان-github-action) · [تنظیمات](#تنظیمات) · [توسعه](#توسعه) · [مجوز](#مجوز)
+**فهرست:** [این پروژه چه کار می‌کند](#این-پروژه-چه-کار-می-کند) · [تازه‌های نسخه ۲](#تازه-های-نسخه-۲) · [معماری](#معماری) · [مدل امنیتی](#مدل-امنیتی) · [موتورها](#موتورهای-پشتیبانی‌شده) · [راه‌اندازی](#راه-اندازی-سریع) · [دموی ۶۰ ثانیه‌ای](#دموی-۶۰-ثانیه-ای) · [دستورات](#دستورات) · [اکشن گیت‌هاب](#استفاده-به-عنوان-github-action) · [تنظیمات](#تنظیمات) · [بنچمارک](#بنچمارک) · [توسعه](#توسعه) · [مجوز](#مجوز)
 
 ## این پروژه چه کار می‌کند
 
-دیتاویسپر دو کار انجام می‌دهد.
+**۱. ابزار تحلیل لوکال.** یک سؤال درباره‌ی داده بپرسید. دیتاویسپر اسکیمای بزرگ را به جدول‌ها و مسیرهای JOIN مرتبط محدود می‌کند، SQL می‌نویسد، آن را پشت جعبه‌امن AST و دروازه‌ی هزینه اجرا می‌کند، خطاهای خودش را اصلاح می‌کند و پیش از نمایش، مقادیر حساس را پاک می‌کند.
 
-**۱. ابزار لوکال برای بررسی داده.** یک برنامه خط فرمان (ساخته‌شده با `typer` و `rich`) و یک داشبورد Plotly با حالت تاریک. شما درباره‌ی یک مجموعه داده‌ی SQLite، DuckDB یا CSV سؤال می‌پرسید، دیتاویسپر SQL را می‌نویسد، اجرا می‌کند و اگر کوئری خطا بدهد خودش آن را درست می‌کند.
+**۲. ناظر Pull Request.** روی PRهایی که SQL، مهاجرت یا فایل داده را تغییر می‌دهند، بات دریفت اسکیما در سطح ستون، ستون‌های حساس تازه‌معرفی‌شده، افت کارایی پلن (تبدیل جست‌وجوی ایندکس به اسکن کامل) و کندی کوئری‌ها را گزارش می‌کند و یک کامنت چسبان را به‌روز می‌کند. گزارش تعاملی Plotly هم به‌صورت artifact بارگذاری می‌شود.
 
-**۲. بات گیت‌هاب برای Pull Request.** وقتی یک PR اسکیمای دیتابیس را تغییر بدهد، بات بررسی می‌کند چه چیزی عوض شده (ستون اضافه، حذف یا تغییر تایپ، و جدول حذف‌شده) و سرعت کوئری‌ها بین نسخه‌ی قدیم و جدید چقدر فرق کرده است. نتیجه را در یک کامنت واحد می‌گذارد که با هر push به‌روز می‌شود، پس گفتگوی PR شلوغ نمی‌شود. گزارش کامل و تعاملی هم به‌صورت artifact پیوست می‌شود.
+خبری از LangChain یا LlamaIndex نیست. عامل یک حلقه‌ی ReAct کوچک با پایتون ساده است و هر دستور تولیدشده توسط مدل، پیش از اجرا از بررسی AST و دروازه‌ی هزینه مبتنی بر EXPLAIN عبور می‌کند.
 
-در این پروژه خبری از LangChain یا LlamaIndex نیست. عامل هوشمند یک حلقه‌ی ReAct کوچک است که با پایتون ساده نوشته شده. هر دستور SQL که مدل تولید می‌کند، پیش از رسیدن به درایور دیتابیس توسط یک جعبه‌امن در سطح AST (با `sqlglot`) بررسی می‌شود.
+## تازه‌های نسخه ۲
 
-## ویژگی‌ها
+| حوزه | نسخه ۱ | نسخه ۲ |
+| --- | --- | --- |
+| اسکیمای بزرگ | کل DDL در prompt | بازیابی BM25 + گراف FK + مسیر JOIN با دایکسترا و بودجه توکن |
+| انتقال داده | لیست ردیف | جدول بومی Arrow از DuckDB و مادی‌سازی تنبل در بقیه |
+| موتورها | SQLite، DuckDB، CSV | + PostgreSQL، Parquet، JSONL/NDJSON با استخراج برداری JSON |
+| کنترل هزینه | تایم‌اوت و سقف ردیف | + دروازه EXPLAIN: رد JOIN دکارتی و تزریق LIMIT روی اسکن بزرگ |
+| حریم خصوصی | — | تشخیص و پاک‌سازی PII پیش از رسیدن به LLM، ترمینال و کامنت PR |
+| ممیزی PR | دریفت + تأخیر | + ریسک PII و افت پلن کوئری |
+| داشبورد | نمودار موجودی | سری زمانی، توزیع، همبستگی، نمایش پلن و نشان‌های پاک‌سازی به‌صورت خودکار |
 
-- **SQL خوداصلاح‌شونده.** اگر دیتابیس خطا بدهد، مدل خطا را می‌بیند و کوئری را اصلاح می‌کند، حداکثر ۳ بار. اجرا همیشه با یک نتیجه‌ی مشخص یا یک گزارش شکست روشن تمام می‌شود.
-- **جعبه‌امن سخت‌گیر برای SQL.** سه لایه بازرسی. هر چیزی که مطمئن نباشد رد می‌شود. فقط یک دستور فقط-خواندنی می‌تواند به دیتابیس برسد.
-- **یک موتور برای همه‌ی منبع‌ها.** SQLite، DuckDB و CSV پشت یک رابط یکسان هستند، با تایم‌اوت برای هر کوئری، سقف تعداد ردیف و لغو ایمن در یک نخ جداگانه.
-- **دریفت اسکیما در سطح ستون.** ستون‌های اضافه‌شده، حذف‌شده و تغییر تایپ‌داده، به‌علاوه‌ی جدول‌های حذف‌شده، مستقیم از دستورهای `CREATE TABLE` خوانده می‌شوند.
-- **بنچمارک با دروازه‌ی ادغام.** زمان‌گیری بهترین-از-N روی نسخه‌ی پایه و نسخه‌ی جدید. با `--fail-on-regression` می‌توانید جلوی ادغام یک تغییر کند را بگیرید.
-- **یک کامنت برای هر PR.** بات به‌جای ساخت کامنت جدید، کامنت قبلی خودش را ویرایش می‌کند.
-- **داشبورد حالت تاریک.** یک فایل HTML مستقل با کارت‌های KPI، تایم‌لاین اجرا و نمودارهای دریفت و بنچمارک.
-- **بدون LLM هم کار می‌کند.** اگر کلید API نداشته باشید، ممیزی باز هم گزارش دریفت و بنچمارک را تولید می‌کند.
+## معماری
+
+</div>
+
+```mermaid
+flowchart LR
+    subgraph Clients["کلاینت‌ها"]
+        CLI["رابط خط فرمان · typer + rich"]
+        DASH["داشبورد · HTML مستقل Plotly"]
+        GHA["رانر GitHub Actions"]
+    end
+
+    subgraph Core["هسته DataWhisper"]
+        GRAPH["schema_graph.py<br/>بازیابی BM25<br/>مسیر JOIN با دایکسترا"]
+        AGENT["agent.py<br/>حلقه ReAct چهارمرحله‌ای"]
+        SEC["security.py<br/>جعبه‌امن AST<br/>دروازه هزینه"]
+        PRIV["privacy.py<br/>تشخیص PII<br/>پاک‌سازی"]
+        DB["database.py<br/>SQLite · DuckDB · Postgres<br/>Parquet · JSONL · Arrow"]
+    end
+
+    LLM{"Gemini / OpenAI"}
+    GH["GitHub REST API<br/>کامنت چسبان حاکمیت"]
+
+    CLI --> AGENT
+    GHA --> AGENT
+    AGENT --> GRAPH
+    AGENT --> SEC
+    SEC --> DB
+    DB --> PRIV
+    PRIV --> AGENT
+    AGENT <--> LLM
+    GHA --> SEC
+    GHA --> GH
+```
+
+<div dir="rtl">
+
+### خط لوله‌ی چهارمرحله‌ای
+
+۱. **بازیابی زیراسکیما.** جدول‌ها با BM25 روی نام جدول و ستون امتیاز می‌گیرند. K جدول برتر با گسترش Prim روی یال‌های کلید خارجی (دایکسترای چندمبدأ) به هم متصل می‌شوند و جدول‌های پهن به ستون‌های مرتبط به‌علاوه‌ی کلیدها فشرده می‌شوند. فقط همین زیراسکیما با بودجه‌ی توکن وارد prompt می‌شود.
+
+۲. **تولید کوئری.** مدل SQL را با دیالکت موتور می‌نویسد. تابع `transpile_sql` ابتدا تحت دیالکت مبدأ اعتبارسنجی می‌کند و سپس به مقصد ترجمه می‌کند تا تفاوت پارسرها راه فرار نشود.
+
+۳. **دروازه و اجرا.** ابتدا جعبه‌امن AST، سپس پلن‌گیر، و در پایان اجرا با تایم‌اوت و سقف ردیف در یک نخ کارگر.
+
+۴. **جمع‌بندی.** نتایج پاک‌سازی و سپس خلاصه می‌شوند. همه‌ی نوبت‌های ReAct برای داشبورد و لاگ CI نگه‌داری می‌شوند.
+
+## مدل امنیتی
+
+### جعبه‌امن AST
+
+| لایه | قاعده |
+| --- | --- |
+| واژگانی | بدون سمی‌کالن و بدون توکن کامنت؛ حتی داخل رشته‌های متنی. این سخت‌گیری یک دسته حمله‌ی تفاوت پارسر را حذف می‌کند. |
+| ساختاری | دقیقاً یک دستور؛ ریشه باید `SELECT`، عملگر مجموعه‌ای، زیرکوئری یا `EXPLAIN` باشد — فهرست‌سفید، نه فهرست‌سیاه. |
+| معنایی | مسدودسازی گره‌های تغییردهنده در هر عمق (حتی زیر CTE)، توابع خواندن فایل (`read_csv`، `read_parquet`)، بارگذاری اکستنشن، `getenv`، `COPY`، `INSTALL`، `ATTACH`، توابع سمت سرور PostgreSQL (`pg_read_file`، `dblink`، `pg_sleep`) و فرار کاتالوگی مثل `secret_db.main.t`. |
+
+توابع جدولی خطرناک DuckDB به گره‌ی تایپ‌دار تبدیل می‌شوند (`read_csv` → `ReadCSV`) که نامش آرگومان است؛ بنابراین بررسی هم نام فراخوانی و هم نام کلاس snake_case را می‌پوشاند.
+
+### دروازه‌ی هزینه
+
+پیش از اجرا، خروجی `EXPLAIN` به یک مدل پلن یکسان تبدیل می‌شود.
+
+- **JOIN دکارتی رد می‌شود.** تشخیص مبتنی بر AST است (جدول‌هایی که در همان دامنه‌ی کوئری هیچ شرط اتصالی ندارند)، پس روی همه‌ی موتورها کار می‌کند.
+- **اسکن بزرگ صفحه‌بندی می‌شود.** اگر اسکن برآوردی از `DW_MAX_SCAN_ROWS` بیشتر باشد و محدودیت tighter وجود نداشته باشد، `LIMIT` تزریق و دوباره اعتبارسنجی می‌شود.
+- **کوئری از قبل محدود** با ذکر دلیل مجاز است؛ رد کردن یک `LIMIT 10` غیرمنتظره بود.
+- **خطای پلن‌گیر** تابع `DW_PLAN_FAILURE_POLICY` است؛ پیش‌فرض `allow_with_budget` چون تایم‌اوت و سقف ردیف همچنان برقرارند. برای رفتار کاملاً fail-closed مقدار `reject` بگذارید.
+
+### پاک‌سازی PII
+
+تشخیص، دو نشانه را ترکیب می‌کند: معنای ستون (ستونی به نام `email` حتی با یک نمونه‌ی بی‌خطر حساس است) و الگوی مقدار (ایمیل، شماره کارت معتبر با الگوریتم لان، SSN، تلفن قالبی، کلیدهای API مثل `sk-…`، `AKIA…`، `ghp_…` و JWT).
+
+| حالت | نمونه خروجی |
+| --- | --- |
+| `hash` (پیش‌فرض) | `email_9f2c…` — HMAC-SHA256 با `DW_PII_SALT`، پایدار بین اجراهای CI |
+| `mask` | `a***@example.com`، `**** **** **** 1111` |
+| `tokenize` | `<EMAIL:1>` — پایدار در یک اجرا |
+| `redact` | `[REDACTED:EMAIL]` |
+
+تضمین‌ها: پاک‌سازی داخل موتور اجرا انجام می‌شود، پس همه‌ی مصرف‌کننده‌ها (context مدل، ترمینال، داشبورد، کامنت PR) فقط ردیف پاک‌شده می‌بینند؛ گزارش تلمتری فقط شمارش و نام ستون دارد و هیچ مقدار خامی ندارد؛ `DW_PII_ALLOW_COLUMNS` تنها راه استثنا است.
+
+> معامله‌ی صادقانه: برای منابع Parquet/JSONL موتور یک view در DuckDB می‌سازد که تنبل ارزیابی می‌شود، پس نمی‌توان دسترسی فایل DuckDB را بدون مادی‌سازی کل فایل غیرفعال کرد. zero-trust یک لایه بالاتر اعمال می‌شود: SQL کاربر هرگز به توابع فایل نمی‌رسد و فقط همان view ثبت‌شده در دسترس است. فایل `.duckdb` با `read_only=True`، SQLite با `mode=ro` و `query_only` و PostgreSQL در تراکنش فقط-خواندنی با `statement_timeout` اجرا می‌شود.
+
+## موتورهای پشتیبانی‌شده
+
+| منبع | درایور | دیالکت | توضیح |
+| --- | --- | --- | --- |
+| `.sqlite`, `.db` | `sqlite3` استاندارد | sqlite | `mode=ro` + `query_only` |
+| `.duckdb` | اکسترای `duckdb` | duckdb | `read_only=True` |
+| `.parquet` و دایرکتوری | view در DuckDB | duckdb | انتقال بومی Arrow |
+| `.jsonl`, `.ndjson` | `read_json_auto` | duckdb | استخراج برداری داده‌ی تودرتو |
+| `.csv` | DuckDB، با جایگزین SQLite | duckdb/sqlite | نوع‌دهی هنگام نبود DuckDB |
+| `postgres://…` | اکسترای `postgres` | postgres | تراکنش فقط-خواندنی و تایم‌اوت سمت سرور |
 
 ## راه‌اندازی سریع
 
-به **پایتون ۳.۱۱ یا بالاتر** نیاز دارید. دیتاویسپر هنوز روی PyPI منتشر نشده، پس آن را از همین مخزن نصب کنید:
+به **پایتون ۳.۱۱ یا بالاتر** نیاز دارید. نصب از همین مخزن انجام می‌شود (هنوز روی PyPI نیست):
 
 </div>
 
@@ -249,20 +415,28 @@ Apache-2.0. See [LICENSE](LICENSE).
 git clone https://github.com/Green-tero/datawhisper.git
 cd datawhisper
 
-# نصب با pip
-pip install -e ".[duckdb,llm]"        # or: poetry install --with dev --extras duckdb
-
-# تنظیم کلید API (اختیاری: بدون آن هم ممیزی به‌صورت قطعی اجرا می‌شود)
-export GEMINI_API_KEY=...             # or OPENAI_API_KEY=...
+pip install -e ".[duckdb,arrow]"     # در صورت نیاز ,postgres و ,llm
+poetry install --with dev --extras "duckdb arrow"   # محیط توسعه
 ```
 
 <div dir="rtl">
 
-اکسترای `[duckdb]` پشتیبانی DuckDB را اضافه می‌کند و `[llm]` کیت‌های Gemini و OpenAI را. می‌توانید بدون هر دو نصب کنید و باز هم از SQLite، CSV، تشخیص دریفت و بنچمارک استفاده کنید.
+| اکسترا | چه اضافه می‌کند |
+| --- | --- |
+| `duckdb` | موتور DuckDB و منابع Parquet و JSONL |
+| `arrow` | انتقال zero-copy با PyArrow و تبدیل Polars |
+| `postgres` | درایور PostgreSQL |
+| `llm` | کیت‌های Gemini و OpenAI |
 
-## در ۶۰ ثانیه امتحان کنید
+</div>
 
-یک دیتابیس نمونه بسازید، سپس آن را بررسی کنید و داشبورد بگیرید. برای این دو مرحله کلید API لازم نیست.
+```bash
+export GEMINI_API_KEY=...     # or OPENAI_API_KEY=...
+```
+
+<div dir="rtl">
+
+## دموی ۶۰ ثانیه‌ای
 
 </div>
 
@@ -271,168 +445,143 @@ python - <<'PY'
 import sqlite3
 db = sqlite3.connect("demo.sqlite")
 db.executescript("""
-CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, country TEXT);
-CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, amount REAL, status TEXT);
-INSERT INTO customers VALUES (1,'Ada','UK'),(2,'Alan','UK'),(3,'Maryam','IR'),(4,'Grace','US');
-INSERT INTO orders VALUES (1,1,120.5,'paid'),(2,2,NULL,'refunded'),(3,3,75.25,'paid'),(4,4,10.0,'pending');
+CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, email TEXT, country TEXT);
+CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id),
+                     amount REAL, status TEXT, placed_at TEXT);
+INSERT INTO customers VALUES (1,'Ada','ada@example.com','UK'),(2,'Alan','alan@example.com','UK'),
+                             (3,'Maryam','m@example.org','IR'),(4,'Grace',NULL,'US');
+INSERT INTO orders VALUES (1,1,120.5,'paid','2024-05-01'),(2,1,35.0,'paid','2024-05-02'),
+                          (3,2,89.9,'pending','2024-05-03'),(4,2,NULL,'refunded','2024-05-04'),
+                          (5,3,250.0,'paid','2024-05-05'),(6,4,64.0,'pending','2024-05-06');
 """)
 db.commit()
 PY
 
-datawhisper inspect --db demo.sqlite --profile orders.amount
-datawhisper dashboard --db demo.sqlite -o report.html
+# آنچه مدل می‌بیند؛ بدون فراخوانی مدل و بدون اجرای SQL
+datawhisper inspect --db demo.sqlite --graph "revenue per customer country"
+
+# حکم جعبه‌امن و دروازه هزینه برای JOIN دکارتی (رد می‌شود، خروج غیرصفر)
+datawhisper explain "SELECT * FROM customers, orders" --db demo.sqlite
+
+# نمودارهای خودکار، نمایش پلن و نشان‌های پاک‌سازی
+datawhisper dashboard --db demo.sqlite --sql "SELECT * FROM orders" -o report.html
+
+# با کلید API: تحلیل کامل عاملی
+datawhisper ask "which country generates the most refund risk?" --db demo.sqlite
 ```
 
 <div dir="rtl">
-
-دستور `inspect` کاتالوگ را نشان می‌دهد و برای ستون انتخاب‌شده نسبت نال، تعداد مقادیر یکتا و پرتکرارترین مقادیر را. فایل `report.html` را باز کنید تا داشبورد حالت تاریک را ببینید.
-
-اگر کلید API تنظیم کرده باشید، می‌توانید سؤال هم بپرسید:
-
-</div>
-
-```bash
-datawhisper ask "کدام مشتریان بیشترین ریسک بازپرداخت را دارند؟" --db demo.sqlite
-```
-
-<div dir="rtl">
-
-با `datawhisper --help` همه‌ی دستورها و گزینه‌ها را ببینید.
-
-## اجزا چطور به هم وصل می‌شوند
-
-</div>
-
-```mermaid
-flowchart LR
-    subgraph Clients["کلاینت‌ها"]
-        CLI["رابط خط فرمان · typer + rich"]
-        DASH["داشبورد وب · HTML مستقل با Plotly"]
-        GHA["رانر GitHub Actions"]
-    end
-
-    subgraph Core["هسته DataWhisper"]
-        SEC["core/security.py<br/>جعبه‌امن SQL مبتنی بر AST (fail-closed)"]
-        DB["core/database.py<br/>موتور SQLite / DuckDB<br/>ایزولاسیون تایم‌اوت و سقف ردیف"]
-        AGENT["core/agent.py<br/>حلقه ReAct بدون فریم‌ورک<br/>خوداصلاحی SQL (حداکثر ۳ تلاش)"]
-        PROV{"رابط مدل<br/>Gemini · OpenAI · Scripted"}
-    end
-
-    GH["GitHub REST API<br/>کامنت‌های چسبان روی PR"]
-    REPORT["visualization/dashboard.py<br/>گزارش مدیریتی حالت تاریک"]
-
-    CLI --> AGENT
-    GHA --> AGENT
-    AGENT --> SEC
-    SEC --> DB
-    AGENT <--> PROV
-    AGENT --> REPORT --> DASH
-    GHA --> GH
-    SEC -. "دریفت اسکیما با مقایسه DDL توسط sqlglot" .-> GH
-```
-
-<div dir="rtl">
-
-### عامل چطور کار می‌کند
-
-عامل در فایل `core/agent.py` است و چهار مرحله را طی می‌کند.
-
-۱. **نگاه به داده.** ابزارهای `inspect_schema` و `profile_column` جدول‌ها، تایپ ستون‌ها، نسبت نال‌ها، تعداد مقادیر یکتا و پرتکرارترین مقادیر را نشان می‌دهند.
-۲. **نوشتن کوئری.** مدل SQL را با دیالکت درست (SQLite یا DuckDB) می‌نویسد. جعبه‌امن پیش از اجرا ساختار آن را بررسی می‌کند.
-۳. **اجرا و اصلاح خطا.** کوئری روی یک اتصال فقط-خواندنی، با یک کارگر و با تایم‌اوت اجرا می‌شود. اگر درایور خطا بدهد، همان پیام خطا عیناً به مدل برمی‌گردد تا SQL را اصلاح کند. بعد از ۳ اصلاح ناموفق، یک گزارش شکست ساخت‌یافته می‌گیرید.
-۴. **توضیح نتیجه.** مرحله‌ی `final_answer` یافته‌ها را با عدد واقعی خلاصه می‌کند. تمام مراحل به‌عنوان رد حسابرسی نگه‌داری می‌شوند و به‌صورت تایم‌لاین اجرا نمایش داده می‌شوند.
-
-### امنیت
-
-جعبه‌امن در فایل `core/security.py` است. هر چیزی که نتواند به‌وضوح تأیید کند، رد می‌شود.
-
-| لایه | چه چیزی بررسی می‌شود |
-| --- | --- |
-| واژگانی | بدون چند دستور و بدون توکن کامنت. این بررسی سخت‌گیرانه است و حتی داخل رشته‌های متنی هم اعمال می‌شود. |
-| ساختاری | ریشه‌ی AST باید فقط `SELECT`، یک عملگر مجموعه‌ای یا `EXPLAIN` باشد. این یک فهرست‌سفید است، نه فهرست‌سیاه. |
-| معنایی | `PRAGMA`، `ATTACH`، `COPY`، `INSTALL`، توابع جدولی خواندن فایل (مثل `read_csv` و `read_parquet`)، `load_extension`، `getenv` و فرار با ارجاع کاتالوگی مثل `secret_db.main.t` مسدود می‌شوند. |
 
 ## دستورات
 
 | دستور | کاربرد |
 | --- | --- |
-| `datawhisper ask "<سؤال>" --db <file>` | اجرای عامل خوداصلاح‌شونده روی یک مجموعه داده. |
-| `datawhisper inspect --db <file> [--profile table.column]` | نمایش کاتالوگ، تایپ‌ها، تعداد ردیف‌ها و آمار ستون‌ها. |
-| `datawhisper dashboard --db <file> -o report.html [--question ...]` | ساخت داشبورد مستقل حالت تاریک. |
-| `datawhisper audit --repo owner/name --pr N --base-ref main --head-ref SHA` | حالت CI: دریفت، بنچمارک و تحلیل، و ثبت کامنت چسبان روی PR. |
-| `datawhisper audit --base-sql old.sql --head-sql new.sql --dry-run` | ممیزی آفلاین دو نسخه‌ی مهاجرت. |
-| `datawhisper audit ... --baseline-db a.db --candidate-db b.db --bench-file suite.sql` | افزودن بنچمارک کوئری به هر ممیزی. |
+| `datawhisper ask "<سؤال>" --db <src> [--explain-only]` | تحلیل عاملی؛ `--explain-only` فقط context هرس‌شده را نشان می‌دهد. |
+| `datawhisper inspect --db <src> [--profile t.c] [--graph "<سؤال>"]` | کاتالوگ، آمار ستون یا پیش‌نمایش هرس اسکیما. |
+| `datawhisper explain "<sql>" --db <src>` | اجرای آزمایشی: حکم AST + پلن نرمال‌شده + تصمیم هزینه. |
+| `datawhisper dashboard --db <src> [-o out.html]` | گزارش مستقل حالت تاریک. |
+| `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | ممیزی آفلاین دریفت و PII. |
+| `datawhisper audit --repo o/r --pr N --base-ref main --ci-audit` | حاکمیت PR به‌صورت headless و ثبت کامنت چسبان. |
+
+کدهای خروج: `0` موفق، `1` یافتن مشکل با `--fail-on-regression` یا `--fail-on-pii` یا شکست عامل، `2` خطای تنظیمات/امنیت/API.
 
 ## استفاده به‌عنوان GitHub Action
 
-فایل [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml) را در مخزن خود کپی کنید. این فایل برای اجرا روی همین مخزن از قبل آماده است.
-
-یک secret اختیاری دارید:
+فایل [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml) را کپی کنید. روی PRهایی اجرا می‌شود که `*.sql`، `*.sqlite`، `*.duckdb`، `*.parquet`، `*.jsonl`، `migrations/**`، `db/**` یا `seeds/**` را تغییر دهند.
 
 | Secret | اجباری | کاربرد |
 | --- | --- | --- |
-| `GEMINI_API_KEY` (یا `OPENAI_API_KEY`) | خیر | لایه‌ی تحلیل هوشمند را فعال می‌کند. بدون آن، ممیزی فقط دریفت و بنچمارک را اجرا می‌کند. |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | خیر | تحلیل عاملی؛ بدون آن هم دریفت، PII و پلن بررسی می‌شوند. |
+| `DW_PII_SALT` | خیر | نمک پایدار برای یکسان ماندن pseudonymها بین اجراها. |
 
-توکن `GITHUB_TOKEN` را خود Actions به‌صورت خودکار می‌دهد و نیازی به تنظیم ندارد.
+توکن `GITHUB_TOKEN` خودکار است. گزارش یک کامنت با نشانگر `<!-- datawhisper:audit -->` است و بخش‌های دریفت، ریسک PII، پلن/بنچمارک و تحلیل به‌صورت جمع‌شونده نمایش داده می‌شوند.
 
-این workflow:
+نشانه‌های افت پلن عمداً محدودند تا هشدار بی‌مورد تولید نشود: تبدیل جست‌وجوی ایندکس به اسکن کامل، رشد بیش از دو برابری ردیف‌های اسکن‌شده بالای ۱۰۰۰، ایجاد cross product تازه، یا شکست کوئری روی یکی از نسخه‌ها.
 
-- روی PRهایی اجرا می‌شود که `*.sql`، `*.sqlite`، `*.sqlite3`، `*.duckdb`، `migrations/**`، `db/**` یا `seeds/**` را تغییر بدهند؛
-- یک کامنت واحد (با نشانگر `<!-- datawhisper:audit -->`) شامل جدول‌های دریفت اسکیما، نتیجه‌ی بنچمارک و نوارهای متنی تأخیر می‌گذارد یا به‌روز می‌کند. گیت‌هاب تگ `<script>` را از کامنت‌ها حذف می‌کند، برای همین نمودارهای تعاملی در artifact بارگذاری‌شده‌ی Plotly هستند؛
-- با گزینه‌ی `--fail-on-regression` با کد خروج غیرصفر تمام می‌شود تا بتوانید جلوی ادغام را بگیرید.
-
-> این workflow فقط روی PRهایی اجرا می‌شود که فایل داده‌ای تغییر داده باشند، پس روی شاخه‌ی `main` ساکت می‌ماند. این رفتار طبیعی است.
-
-</div>
-
-```yaml
-- run: |
-    datawhisper audit \
-      --repo "${{ github.repository }}" \
-      --pr "${{ github.event.pull_request.number }}" \
-      --base-ref "${{ github.base_ref }}" \
-      --head-ref "${{ github.event.pull_request.head.sha }}" \
-      --fail-on-regression
-  env:
-    DATAWHISPER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-<div dir="rtl">
-
-برای ممیزی دو فایل مهاجرت به‌صورت لوکال، بدون نیاز به گیت‌هاب:
-
-</div>
-
-```bash
-datawhisper audit --base-sql migrations/V001__old.sql --head-sql migrations/V002__new.sql --dry-run
-```
-
-<div dir="rtl">
+> این workflow فقط روی PRهایی با تغییر فایل داده اجرا می‌شود، پس روی `main` ساکت است. این رفتار طبیعی است.
 
 ## تنظیمات
 
 | متغیر | پیش‌فرض | معنی |
 | --- | --- | --- |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` | ندارد | اعتبارنامه‌ی ارائه‌دهنده. به این ترتیب تشخیص داده می‌شود: اول Gemini، بعد OpenAI. |
-| `DW_LLM_PROVIDER` | خودکار | `gemini`، `openai` یا `none` |
-| `DW_LLM_MODEL` | بسته به ارائه‌دهنده | مثلاً `gemini-2.0-flash` یا `gpt-4o-mini` |
-| `DW_QUERY_TIMEOUT` | `10` | محدودیت زمانی هر دستور، به ثانیه |
-| `DW_MAX_ROWS` | `1000` | بیشترین تعداد ردیف برگردانده‌شده برای هر کوئری |
-| `DW_MAX_REPAIRS` | `3` | تعداد دفعاتی که عامل قبل از انصراف، کوئری ناموفق را دوباره امتحان می‌کند |
-| `DATAWHISPER_GITHUB_TOKEN` / `GITHUB_TOKEN` | ندارد | توکن ثبت کامنت PR در CI |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | ندارد | اعتبارنامه؛ اول Gemini تشخیص داده می‌شود |
+| `DW_LLM_PROVIDER`، `DW_LLM_MODEL` | خودکار | بازنویسی ارائه‌دهنده و مدل |
+| `DW_QUERY_TIMEOUT` | `10` | محدودیت زمانی هر دستور (ثانیه) |
+| `DW_MAX_ROWS` | `1000` | سقف سخت ردیف در هر نتیجه |
+| `DW_MAX_REPAIRS` | `3` | تعداد تلاش خوداصلاحی |
+| `DW_COST_ENABLED` | `true` | فعال‌سازی دروازه EXPLAIN |
+| `DW_MAX_SCAN_ROWS` | `5000000` | بودجه اسکن پیش از صفحه‌بندی اجباری |
+| `DW_AUTO_LIMIT` | `500` | مقدار LIMIT تزریقی |
+| `DW_REJECT_CARTESIAN` | `true` | رد JOIN دکارتی |
+| `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | `allow_with_budget` یا `reject` |
+| `DW_PII_ENABLED`، `DW_PII_MODE` | `true`، `hash` | کلید و حالت پاک‌سازی |
+| `DW_PII_SALT` | پیش‌فرض محلی | نمک HMAC؛ در CI به‌صورت secret |
+| `DW_PII_ALLOW_COLUMNS` | خالی | ستون‌های معاف از پاک‌سازی |
+| `DW_GRAPH_MAX_TABLES` | `6` | تعداد جدول نگه‌داشته‌شده برای هر سؤال |
+| `DW_GRAPH_MAX_COLUMNS` | `12` | سقف ستون هر جدول در prompt |
+| `DW_GRAPH_MAX_TOKENS` | `1500` | بودجه توکن context اسکیما |
+
+## بنچمارک
+
+اندازه‌گیری‌شده روی ماشین توسعه (ویندوز، پایتون ۳.۱۵، SQLite در حافظه) در همین commit. این‌ها میکروبنچمارک مصنوعی‌اند، نه ادعای throughput تولیدی:
+
+| عملیات | ورودی | میانه |
+| --- | --- | --- |
+| بازیابی اسکیما (BM25 + دایکسترا) | زنجیره ۶۰ جدولی FK | **۰.۷۲ میلی‌ثانیه** |
+| اعتبارسنجی AST | join + aggregate + LIMIT | **۰.۳۹ میلی‌ثانیه** |
+| پاک‌سازی PII | ۱۰٬۰۰۰ سلول در ۵ ستون | **۲۸.۹ میلی‌ثانیه** |
+| کل تست‌ها | ۱۲۳ تست | حدود ۱.۶ ثانیه |
+
+بازتولید عدد گراف:
+
+</div>
+
+```bash
+python - <<'PY'
+import statistics, time
+from tests.conftest import make_large_catalog
+from datawhisper.core.schema_graph import SchemaGraph
+
+graph = SchemaGraph(make_large_catalog(60))
+samples = []
+for _ in range(200):
+    start = time.perf_counter()
+    graph.retrieve("metric value for t42 joined to t7", top_k=6)
+    samples.append((time.perf_counter() - start) * 1000)
+print(f"median {statistics.median(samples):.2f} ms")
+PY
+```
+
+<div dir="rtl">
+
+تست رگرسیون تأخیر کوئری موضوعی جدا و وابسته به مخزن است: دو نسخه دیتابیس و مجموعه‌ای از کوئری‌های نماینده تهیه کنید.
+
+</div>
+
+```bash
+datawhisper audit --base-sql schema.sql --head-sql schema.sql \
+  --baseline-db old.sqlite --candidate-db new.sqlite \
+  --bench-file benchmarks/queries.sql --fail-on-regression
+```
+
+<div dir="rtl">
 
 ## توسعه
 
 </div>
 
 ```bash
-poetry install --with dev --extras duckdb
-pre-commit install                 # ruff, black و mypy سخت‌گیرانه
-poetry run pytest -v               # تست‌های امنیت، خوداصلاحی و بات گیت‌هاب
-poetry run mypy datawhisper        # بررسی تایپ سخت‌گیرانه
+poetry install --with dev --extras "duckdb arrow"
+pre-commit install
+poetry run pytest -v          # ۱۲۳ تست
+poetry run ruff check .
+poetry run black --check .
+poetry run mypy datawhisper   # سخت‌گیرانه
 ```
 
 <div dir="rtl">
+
+پوشش تست‌ها: ۲۲ بردار تزریق/فرار، رفتار دروازه برای JOIN دکارتی و بودجه اسکن، تشخیص ایمیل/کارت با لان/SSN/تلفن/کلید API/JWT، تضمین نشت‌صفر روی خروجی موتور و مقادیر پرتکرار پروفایل، بازیابی BM25 روی ۶۰ جدول و مسیر ۳۵ گامی، اجرای چندموتوری (SQLite، DuckDB، Parquet، JSONL) و خوداصلاحی پس از خطای امنیتی، هزینه و درایور.
 
 ## مجوز
 

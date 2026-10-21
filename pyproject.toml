@@ -4,40 +4,44 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "datawhisper"
-version = "0.1.0"
-description = "Enterprise-grade, local-first agentic tabular data engine with self-correcting SQL and autonomous GitHub PR auditing."
+version = "2.0.0"
+description = "Zero-trust agentic data analysis and CI/CD database governance engine with graph-pruned context, Arrow pipelines and PII-safe outputs."
 authors = ["DataWhisper Maintainers <maintainers@datawhisper.local>"]
 license = "Apache-2.0"
 readme = "README.md"
-keywords = ["sql", "agent", "llm", "sqlite", "duckdb", "github-actions", "ci"]
+keywords = ["sql", "ai-agents", "sqlite", "duckdb", "postgres", "parquet", "arrow", "github-actions"]
 packages = [{ include = "datawhisper" }]
 
 [tool.poetry.dependencies]
 python = "^3.11"
 pydantic = "^2.7"
-typer = "^0.12"
-rich = "^13.7"
-sqlglot = ">=23.0,<26.0"
+typer = ">=0.12"
+rich = ">=13.7"
+sqlglot = ">=23.0,<27.0"
 requests = "^2.31"
 plotly = "^5.22"
-duckdb = { version = ">=0.10", optional = true }
+pyarrow = { version = ">=15.0", optional = true }
+polars = { version = ">=1.0", optional = true }
+duckdb = { version = ">=1.0", optional = true }
+psycopg = { version = "^3.1", optional = true, extras = ["binary"] }
 openai = { version = ">=1.30", optional = true }
 google-generativeai = { version = ">=0.6", optional = true }
-streamlit = { version = ">=1.35", optional = true }
 
 [tool.poetry.extras]
+arrow = ["pyarrow", "polars"]
 duckdb = ["duckdb"]
+postgres = ["psycopg"]
 llm = ["openai", "google-generativeai"]
-ui = ["streamlit"]
+all = ["pyarrow", "polars", "duckdb", "psycopg", "openai", "google-generativeai"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2"
 pytest-mock = "^3.14"
 mypy = "^1.10"
 ruff = ">=0.4"
-black = "^24.4"
-types-requests = "^2.31"
+black = "24.10.0"
 pre-commit = "^3.7"
+types-requests = "^2.31"
 
 [tool.poetry.scripts]
 datawhisper = "datawhisper.cli:main"
@@ -65,6 +69,9 @@ exclude = ["tests"]
 [[tool.mypy.overrides]]
 module = [
     "duckdb.*",
+    "pyarrow.*",
+    "polars.*",
+    "psycopg.*",
     "openai.*",
     "google.*",
     "streamlit.*",

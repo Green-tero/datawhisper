@@ -1,22 +1,30 @@
-"""Plotly dark-mode dashboard and standalone executive report generator.
+"""Dark-mode Plotly dashboards and the standalone executive report.
 
-The module produces a single self-contained HTML file: KPI cards are plain
-CSS (crisper than chart-based indicators at small sizes), while timelines,
-benchmarks, drift and data distributions are Plotly figures rendered into
-the same dark template. Plotly.js is loaded once from a CDN tag injected in
-the page head, so each figure embed costs only its own JSON payload.
+Chart selection is data-driven rather than hard-coded: column kinds are
+inferred from the scrubbed result batch (ISO timestamps, numerics, low-
+cardinality categories), then timeseries, distributions, category bars and a
+correlation heatmap are emitted only when the data can support them. Numbers
+are computed in pure Python so the module does not require NumPy.
 """
 
 from __future__ import annotations
 
+import math
+from collections import Counter
 from collections.abc import Sequence
+from datetime import date, datetime
+from typing import Any
 
 import plotly.graph_objects as go
-from pydantic import BaseModel
 
 from datawhisper.core.agent import AgentStep
-from datawhisper.core.database import CatalogSnapshot
-from datawhisper.integrations.github_bot import BenchmarkResult, DriftReport
+from datawhisper.core.models import PlanInfo, RedactionReport
+from datawhisper.integrations.github_bot import (
+    BenchmarkResult,
+    DriftReport,
+    PiiExposure,
+    PlanRegression,
+)
 
 _BG = "#0d1117"
 _CARD = "#161b22"
@@ -27,17 +35,23 @@ _ACCENT = "#58a6ff"
 _COLORS = ["#58a6ff", "#3fb950", "#d29922", "#f97583", "#bc8cff", "#39c5cf"]
 
 
-class ReportSection(BaseModel):
-    """One vertical block of the report; ``html`` may embed figure fragments."""
+class KpiCard:
+    """Small value object so callers need no pydantic model for chrome."""
 
-    heading: str
-    html: str = ""
+    __slots__ = ("detail", "label", "value")
+
+    def __init__(self, label: str, value: str, detail: str = "") -> None:
+        self.label = label
+        self.value = value
+        self.detail = detail
 
 
-class KpiCard(BaseModel):
-    label: str
-    value: str
-    detail: str = ""
+class ChartBlock:
+    __slots__ = ("heading", "html")
+
+    def __init__(self, heading: str, html: str) -> None:
+        self.heading = heading
+        self.html = html
 
 
 def _dark_layout(title: str) -> go.Layout:
@@ -47,52 +61,213 @@ def _dark_layout(title: str) -> go.Layout:
         paper_bgcolor=_BG,
         plot_bgcolor=_BG,
         font={"color": _TEXT},
-        margin={"l": 40, "r": 24, "t": 48, "b": 40},
+        margin={"l": 50, "r": 24, "t": 48, "b": 44},
     )
 
 
-def _figure_html(figure: go.Figure, height: int = 360) -> str:
+def _figure_html(figure: go.Figure, height: int = 340) -> str:
     figure.update_layout(height=height)
     return str(figure.to_html(full_html=False, include_plotlyjs=False))
 
 
 # ---------------------------------------------------------------------------
-# Figures
+# Column inference
 # ---------------------------------------------------------------------------
-def table_rowcount_figure(catalog: CatalogSnapshot) -> go.Figure:
-    """Rows per table; the first thing an analyst wants to see."""
-    figure = go.Figure()
-    names = [t.name for t in catalog.tables]
-    counts = [t.row_count or 0 for t in catalog.tables]
-    figure.add_trace(go.Bar(x=names, y=counts, marker_color=_ACCENT, name="rows"))
-    figure.update_layout(_dark_layout("Rows per table"))
-    return figure
+def _is_numeric(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if len(candidate) < 10:
+        return None
+    try:
+        return datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        if len(candidate) == 10:
+            try:
+                return datetime.strptime(candidate, "%Y-%m-%d")
+            except ValueError:
+                return None
+        return None
+
+
+def _column_kind(values: Sequence[Any]) -> str:
+    sample = [v for v in values if v is not None]
+    if not sample:
+        return "empty"
+    if all(_is_numeric(v) for v in sample):
+        return "numeric"
+    if all(_parse_datetime(v) is not None for v in sample[:50]):
+        return "datetime"
+    return "categorical"
+
+
+def _numeric_pairs(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]]
+) -> list[tuple[str, list[float]]]:
+    series: list[tuple[str, list[float]]] = []
+    for index, name in enumerate(columns):
+        values = [row[index] for row in rows if index < len(row)]
+        if _column_kind(values) == "numeric":
+            numeric = [float(v) for v in values if _is_numeric(v)]
+            if numeric:
+                series.append((name, numeric))
+    return series
+
+
+def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float | None:
+    size = min(len(xs), len(ys))
+    if size < 3:
+        return None
+    mean_x = sum(xs[:size]) / size
+    mean_y = sum(ys[:size]) / size
+    covariance = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(size))
+    variance_x = sum((xs[i] - mean_x) ** 2 for i in range(size))
+    variance_y = sum((ys[i] - mean_y) ** 2 for i in range(size))
+    denominator = math.sqrt(variance_x * variance_y)
+    if denominator == 0:
+        return None
+    return covariance / denominator
+
+
+# ---------------------------------------------------------------------------
+# Auto charts
+# ---------------------------------------------------------------------------
+def auto_charts(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]], max_charts: int = 6
+) -> list[ChartBlock]:
+    """Infer and render the charts this batch can actually support."""
+    if not rows:
+        return []
+    blocks: list[ChartBlock] = []
+    kinds = {
+        name: _column_kind([row[index] for row in rows if index < len(row)])
+        for index, name in enumerate(columns)
+    }
+
+    datetime_columns = [name for name, kind in kinds.items() if kind == "datetime"]
+    numeric_columns = [name for name, kind in kinds.items() if kind == "numeric"]
+    categorical_columns = [
+        name
+        for name, kind in kinds.items()
+        if kind == "categorical" and 1 < len({row[columns.index(name)] for row in rows}) <= 25
+    ]
+
+    if datetime_columns and numeric_columns:
+        time_column = datetime_columns[0]
+        measure = numeric_columns[0]
+        time_index, measure_index = columns.index(time_column), columns.index(measure)
+        points = [
+            (_parse_datetime(row[time_index]), row[measure_index])
+            for row in rows
+            if _is_numeric(row[measure_index]) and _parse_datetime(row[time_index]) is not None
+        ]
+        if points:
+            figure = go.Figure(
+                go.Scatter(
+                    x=[p[0] for p in points],
+                    y=[p[1] for p in points],
+                    mode="lines+markers",
+                    line={"color": _ACCENT},
+                )
+            )
+            figure.update_layout(_dark_layout(f"{measure} over {time_column}"))
+            figure.update_xaxes(gridcolor=_BORDER)
+            figure.update_yaxes(gridcolor=_BORDER)
+            blocks.append(ChartBlock("Timeseries", _figure_html(figure)))
+
+    for name in numeric_columns[:3]:
+        index = columns.index(name)
+        values = [float(row[index]) for row in rows if _is_numeric(row[index])]
+        figure = go.Figure(go.Histogram(x=values, marker_color=_ACCENT, nbinsx=24))
+        figure.update_layout(_dark_layout(f"Distribution of {name}"))
+        figure.update_xaxes(gridcolor=_BORDER)
+        blocks.append(ChartBlock(f"Distribution · {name}", _figure_html(figure, height=300)))
+
+    if len(numeric_columns) >= 2:
+        matrix: list[list[float | None]] = []
+        for left in numeric_columns:
+            left_values = [
+                float(r[columns.index(left)]) for r in rows if _is_numeric(r[columns.index(left)])
+            ]
+            row_values: list[float | None] = []
+            for right in numeric_columns:
+                right_values = [
+                    float(r[columns.index(right)])
+                    for r in rows
+                    if _is_numeric(r[columns.index(right)])
+                ]
+                row_values.append(_pearson(left_values, right_values))
+            matrix.append(row_values)
+        if any(value is not None for line in matrix for value in line):
+            figure = go.Figure(
+                go.Heatmap(
+                    z=[[value if value is not None else 0.0 for value in line] for line in matrix],
+                    x=numeric_columns,
+                    y=numeric_columns,
+                    colorscale="RdBu",
+                    zmin=-1,
+                    zmax=1,
+                    text=[
+                        [f"{value:.2f}" if value is not None else "n/a" for value in line]
+                        for line in matrix
+                    ],
+                    texttemplate="%{text}",
+                )
+            )
+            figure.update_layout(_dark_layout("Correlation heatmap"))
+            blocks.append(ChartBlock("Correlations", _figure_html(figure, height=380)))
+
+    for name in categorical_columns[:2]:
+        index = columns.index(name)
+        counts = Counter(str(row[index]) for row in rows if row[index] is not None)
+        if not counts:
+            continue
+        top = counts.most_common(12)
+        figure = go.Figure(
+            go.Bar(x=[item[0] for item in top], y=[item[1] for item in top], marker_color=_ACCENT)
+        )
+        figure.update_layout(_dark_layout(f"Counts by {name}"))
+        figure.update_xaxes(tickangle=-30, gridcolor=_BORDER)
+        figure.update_yaxes(gridcolor=_BORDER)
+        blocks.append(ChartBlock(f"Categories · {name}", _figure_html(figure, height=300)))
+
+    return blocks[:max_charts]
 
 
 def timeline_figure(steps: Sequence[AgentStep]) -> go.Figure:
-    """Horizontal execution timeline of the ReAct loop (turn latency)."""
     figure = go.Figure()
-    labels = [f"#{s.index} {s.action}" for s in steps][::-1]
-    durations = [s.elapsed_ms for s in steps][::-1]
+    labels = [f"#{step.index} {step.action}" for step in steps][::-1]
+    durations = [step.elapsed_ms for step in steps][::-1]
     figure.add_trace(
         go.Bar(
             orientation="h",
             x=durations,
             y=labels,
-            marker_color=[_COLORS[s.index % len(_COLORS)] for s in steps][::-1],
-            hovertext=[s.observation[:120] for s in steps][::-1],
-            name="latency",
+            marker_color=[_COLORS[step.index % len(_COLORS)] for step in steps][::-1],
+            hovertext=[step.observation[:120] for step in steps][::-1],
         )
     )
     figure.update_layout(_dark_layout("Agent execution timeline (ms per turn)"))
-    figure.update_xaxes(title_text="elapsed ms", gridcolor=_BORDER)
+    figure.update_xaxes(gridcolor=_BORDER)
     return figure
 
 
+def timeline_block(steps: Sequence[AgentStep]) -> ChartBlock:
+    """Public helper so the CLI need not touch private rendering internals."""
+    return ChartBlock("Agent timeline", _figure_html(timeline_figure(steps)))
+
+
 def drift_figure(drift: DriftReport) -> go.Figure:
-    """Stacked added/removed/changed column counts per drifted table."""
     figure = go.Figure()
-    tables = [t.table for t in drift.tables]
+    tables = [table.table for table in drift.tables]
     figure.add_trace(
         go.Bar(
             name="added",
@@ -122,9 +297,8 @@ def drift_figure(drift: DriftReport) -> go.Figure:
 
 
 def benchmark_figure(benchmarks: Sequence[BenchmarkResult]) -> go.Figure:
-    """Baseline vs candidate latency per benchmarked query."""
     figure = go.Figure()
-    labels = [b.label for b in benchmarks]
+    labels = [bench.label for bench in benchmarks]
     figure.add_trace(
         go.Bar(
             name="baseline",
@@ -138,12 +312,40 @@ def benchmark_figure(benchmarks: Sequence[BenchmarkResult]) -> go.Figure:
             name="candidate",
             x=labels,
             y=[b.candidate_ms or 0 for b in benchmarks],
-            marker_color=[("#f97583" if b.regression else "#3fb950") for b in benchmarks],
+            marker_color=["#f97583" if b.regression else "#3fb950" for b in benchmarks],
         )
     )
     figure.update_layout(_dark_layout("Query benchmarks (ms, lower is better)"), barmode="group")
     figure.update_yaxes(title_text="ms", gridcolor=_BORDER)
     return figure
+
+
+def plan_html(plan: PlanInfo | None) -> str:
+    """Render the normalized plan as a compact HTML table."""
+    if plan is None:
+        return '<p class="muted">No plan captured for this report.</p>'
+    if plan.error:
+        return f'<p class="muted">Planner unavailable: {plan.error}</p>'
+    rows = "".join(
+        f"<tr><td>{node.node_type}</td><td>{node.table or '—'}</td>"
+        f"<td>{'' if node.estimated_rows is None else int(node.estimated_rows)}</td>"
+        f"<td class='muted'>{node.detail[:120]}</td></tr>"
+        for node in plan.nodes[:40]
+    )
+    return (
+        "<table><thead><tr><th>Operator</th><th>Table</th><th>Est. rows</th>"
+        f"<th>Detail</th></tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
+def redaction_badges(report: RedactionReport | None) -> str:
+    if report is None or report.total == 0:
+        return '<span class="badge ok">no PII detected</span>'
+    badges = "".join(
+        f'<span class="badge warn">{category}: {count}</span>'
+        for category, count in sorted(report.by_category.items())
+    )
+    return badges + f'<span class="badge">{report.mode}</span>'
 
 
 # ---------------------------------------------------------------------------
@@ -170,21 +372,25 @@ _HEAD = f"""<!DOCTYPE html>
 <style>
   body {{ background: {_BG}; color: {_TEXT}; margin: 0;
          font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }}
-  .wrap {{ max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }}
+  .wrap {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px 64px; }}
   h1 {{ color: {_ACCENT}; font-size: 26px; margin: 0 0 4px; }}
-  h2 {{ color: {_TEXT}; font-size: 18px; border-bottom: 1px solid {_BORDER};
-        padding-bottom: 8px; margin-top: 40px; }}
+  h2 {{ font-size: 18px; border-bottom: 1px solid {_BORDER};
+        padding-bottom: 8px; margin-top: 36px; }}
   .meta {{ color: {_MUTED}; font-size: 13px; margin-bottom: 24px; }}
-  .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-           gap: 16px; }}
-  .card {{ background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 12px;
-           padding: 18px; }}
-  .label {{ color: {_MUTED}; font-size: 11px; text-transform: uppercase;
-            letter-spacing: 0.08em; }}
+  .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }}
+  .card {{ background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 12px; padding: 18px; }}
+  .label {{ color: {_MUTED}; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }}
   .value {{ font-size: 28px; font-weight: 700; color: {_ACCENT}; margin-top: 6px; }}
-  .detail {{ color: {_MUTED}; font-size: 12px; margin-top: 4px; }}
+  .detail, .muted {{ color: {_MUTED}; font-size: 12px; }}
   .insights {{ background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 12px;
-               padding: 16px 20px; line-height: 1.6; white-space: pre-wrap; }}
+               padding: 16px 20px; line-height: 1.65; white-space: pre-wrap; }}
+  .badge {{ display: inline-block; border: 1px solid {_BORDER}; border-radius: 999px;
+            padding: 3px 10px; margin: 2px 6px 2px 0; font-size: 12px; color: {_TEXT}; }}
+  .badge.ok {{ border-color: #238636; color: #3fb950; }}
+  .badge.warn {{ border-color: #9e6a03; color: #d29922; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid {_BORDER}; }}
+  th {{ color: {_MUTED}; font-weight: 600; }}
   a {{ color: {_ACCENT}; }}
 </style>
 </head>
@@ -196,20 +402,19 @@ _HEAD = f"""<!DOCTYPE html>
 def render_report_html(
     title: str,
     subtitle: str = "",
-    sections: Sequence[ReportSection] = (),
+    blocks: Sequence[ChartBlock] = (),
     kpis: Sequence[KpiCard] = (),
+    raw_sections: Sequence[tuple[str, str]] = (),
 ) -> str:
-    """Assemble the standalone dark-mode dashboard HTML."""
-    parts = [_HEAD]
-    parts.append(f"<h1>{title}</h1>")
+    parts = [_HEAD, f"<h1>{title}</h1>"]
     if subtitle:
         parts.append(f'<div class="meta">{subtitle}</div>')
     if kpis:
         parts.append(_kpi_grid(kpis))
-    for section in sections:
-        parts.append(f"<h2>{section.heading}</h2>")
-        if section.html:
-            parts.append(section.html)
+    for block in blocks:
+        parts.append(f"<h2>{block.heading}</h2>{block.html}")
+    for heading, html in raw_sections:
+        parts.append(f"<h2>{heading}</h2>{html}")
     parts.append("</div></body></html>\n")
     return "".join(parts)
 
@@ -217,75 +422,102 @@ def render_report_html(
 def render_audit_html(
     *,
     drift: DriftReport | None = None,
+    pii: Sequence[PiiExposure] | None = None,
     benchmarks: Sequence[BenchmarkResult] | None = None,
+    plan_regressions: Sequence[PlanRegression] | None = None,
     insights: str | None = None,
     timeline_steps: Sequence[AgentStep] = (),
+    plan: PlanInfo | None = None,
+    redactions: RedactionReport | None = None,
     title: str = "DataWhisper Audit",
     subtitle: str = "",
 ) -> str:
-    """Convenience builder wiring an audit result into the dark template."""
     kpis: list[KpiCard] = []
-    sections: list[ReportSection] = []
+    blocks: list[ChartBlock] = []
+    pii_findings = list(pii or [])
+    regressions = list(plan_regressions or [])
+    bench_list = list(benchmarks or [])
 
     if drift is not None:
-        changed_columns = sum(
-            len(t.added_columns) + len(t.removed_columns) + len(t.type_changes)
-            for t in drift.tables
-        )
-        kpis.append(KpiCard(label="Drifted tables", value=str(len(drift.tables))))
-        kpis.append(KpiCard(label="Column changes", value=str(changed_columns)))
-        kpis.append(KpiCard(label="New tables", value=str(len(drift.added_tables))))
-        kpis.append(KpiCard(label="Dropped tables", value=str(len(drift.dropped_tables))))
+        kpis.append(KpiCard("drifted tables", str(len(drift.tables))))
+        kpis.append(KpiCard("column changes", str(drift.column_changes)))
         if drift.has_changes:
-            sections.append(
-                ReportSection(heading="Schema drift", html=_figure_html(drift_figure(drift)))
-            )
-
-    if benchmarks:
-        regressions = sum(1 for b in benchmarks if b.regression)
-        total_delta = sum(b.delta_ms or 0.0 for b in benchmarks)
-        kpis.append(KpiCard(label="Regressions", value=str(regressions)))
-        kpis.append(
-            KpiCard(
-                label="Latency delta",
-                value=f"{total_delta:+.1f} ms",
-                detail="across benchmark suite",
-            )
-        )
-        sections.append(
-            ReportSection(
-                heading="Query benchmarks", html=_figure_html(benchmark_figure(benchmarks))
-            )
-        )
-
+            blocks.append(ChartBlock("Schema drift", _figure_html(drift_figure(drift))))
+    if pii_findings:
+        kpis.append(KpiCard("PII columns", str(len(pii_findings)), "introduced by this change"))
+    if bench_list:
+        regressions_count = sum(1 for b in bench_list if b.regression)
+        kpis.append(KpiCard("latency regressions", str(regressions_count)))
+        blocks.append(ChartBlock("Query benchmarks", _figure_html(benchmark_figure(bench_list))))
+    if regressions:
+        kpis.append(KpiCard("plan regressions", str(len(regressions))))
     if timeline_steps:
-        kpis.append(KpiCard(label="Agent turns", value=str(len(timeline_steps))))
-        sections.append(
-            ReportSection(
-                heading="Agent timeline", html=_figure_html(timeline_figure(list(timeline_steps)))
-            )
+        kpis.append(KpiCard("agent turns", str(len(timeline_steps))))
+        blocks.append(
+            ChartBlock("Agent timeline", _figure_html(timeline_figure(list(timeline_steps))))
         )
 
-    if insights:
-        sections.append(
-            ReportSection(
-                heading="Agentic insights", html=f'<div class="insights">{insights}</div>'
+    raw_sections: list[tuple[str, str]] = []
+    raw_sections.append(("Redaction audit", f"<p>{redaction_badges(redactions)}</p>"))
+    if plan is not None:
+        raw_sections.append(("Query execution plan", plan_html(plan)))
+    if regressions:
+        rows = "".join(
+            f"<tr><td><code>{r.label}</code></td><td>{r.kind}</td><td>{r.detail}</td></tr>"
+            for r in regressions
+        )
+        raw_sections.append(
+            (
+                "Plan regressions",
+                "<table><thead><tr><th>Query</th><th>Signal</th><th>Detail</th></tr>"
+                f"</thead><tbody>{rows}</tbody></table>",
             )
         )
+    if pii_findings:
+        rows = "".join(
+            f"<tr><td><code>{f.table}</code></td><td><code>{f.column}</code></td>"
+            f"<td>{f.category.value}</td><td>{f.reason}</td></tr>"
+            for f in pii_findings
+        )
+        raw_sections.append(
+            (
+                "PII exposure",
+                "<table><thead><tr><th>Table</th><th>Column</th><th>Category</th>"
+                f"<th>Origin</th></tr></thead><tbody>{rows}</tbody></table>",
+            )
+        )
+    if insights:
+        raw_sections.append(("Agentic insights", f'<div class="insights">{insights}</div>'))
 
     return render_report_html(
         title=title,
         subtitle=subtitle,
-        sections=sections,
+        blocks=blocks,
         kpis=kpis,
+        raw_sections=raw_sections,
     )
 
 
 def save_report(html: str, path: str) -> str:
-    """Write the report to disk, creating parent directories as needed."""
     from pathlib import Path
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(html, encoding="utf-8")
     return str(target)
+
+
+__all__ = [
+    "ChartBlock",
+    "KpiCard",
+    "auto_charts",
+    "benchmark_figure",
+    "drift_figure",
+    "plan_html",
+    "redaction_badges",
+    "render_audit_html",
+    "render_report_html",
+    "save_report",
+    "timeline_block",
+    "timeline_figure",
+]

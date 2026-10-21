@@ -33,12 +33,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry
-          key: ${{ runner.os }}-poetry-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          key: ${{ runner.os }}-poetry-v2-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
-            ${{ runner.os }}-poetry-${{ matrix.python-version }}-
+            ${{ runner.os }}-poetry-v2-${{ matrix.python-version }}-
 
-      - name: Install dependencies
-        run: poetry install --with dev --extras duckdb --no-interaction
+      - name: Install dependencies (DuckDB + Arrow extras)
+        run: poetry install --with dev --extras "duckdb arrow" --no-interaction
 
       - name: Ruff (lint)
         run: poetry run ruff check .
@@ -49,5 +49,5 @@ jobs:
       - name: Mypy (strict typing)
         run: poetry run mypy datawhisper
 
-      - name: Pytest (security, agent and integration suite)
+      - name: Pytest (security, privacy, graph and engine suites)
         run: poetry run pytest -v

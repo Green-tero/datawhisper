@@ -1,19 +1,19 @@
-"""Zero-framework ReAct agent with a self-correcting SQL execution loop.
+"""Zero-framework ReAct agent with graph retrieval, cost awareness and self-healing.
 
-Design rationale
-----------------
-LangChain-style orchestration is intentionally avoided: the loop below is
-~200 lines of plain Python, which keeps latency, token budgets and failure
-modes fully observable. Each turn the model returns exactly one JSON object
-(``thought`` / ``action`` / ``action_input``); the agent dispatches the tool,
-appends the observation, and repeats until ``final_answer`` or a budget
-expires.
+Pipeline
+--------
+1. **Sub-schema retrieval** - BM25 ranks tables, Dijkstra connects them, wide
+   tables are compressed to relevant columns.
+2. **SQL generation** - the model writes dialect-specific SQL (transpilation is
+   available when a dataset is mirrored across engines).
+3. **Guardrails** - AST validation feeds a cost gate that consults the planner
+   before execution; failures return diagnostics, never data.
+4. **Synthesis** - the final answer is grounded in scrubbed observations.
 
-Self-healing contract: when ``run_sql`` fails (syntax error, missing column,
-division by zero, type mismatch) the driver's error message is returned to
-the model verbatim as the observation, which is what allows it to repair the
-SQL. After ``safety.max_sql_repair_attempts`` consecutive failures the agent
-stops instead of burning tokens, and reports the accumulated error telemetry.
+Self-healing contract: security, cost and execution failures are all returned
+as observations containing the exact parser/planner message. The loop allows
+``max_sql_repair_attempts`` rewrites, then stops with structured telemetry
+rather than burning tokens indefinitely.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, runtime_checkable
 from typing import Protocol as ProtocolTyping
@@ -29,51 +28,59 @@ from typing import Protocol as ProtocolTyping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from datawhisper.core.config import DataWhisperConfig, LLMConfig
-from datawhisper.core.database import ExecutionEngine, QueryTimeoutError
-from datawhisper.core.security import SQLSecurityError
+from datawhisper.core.database import (
+    ExecutionEngine,
+    QueryExecutionError,
+    QueryTimeoutError,
+)
+from datawhisper.core.models import AgentTelemetry, RedactionReport
+from datawhisper.core.schema_graph import JoinPlan, PrunedSchema, SchemaGraph
+from datawhisper.core.security import CostViolation, SQLSecurityError
 
-_MAX_OBSERVATION_CHARS = 4000
-_MAX_ROWS_IN_OBSERVATION = 20
+_MAX_OBSERVATION_CHARS = 3500
+_MAX_ROWS_IN_OBSERVATION = 15
+
+#: Tools return either a plain observation or (observation, redaction report).
+ToolResult = str | tuple[str, RedactionReport]
 
 
 # ---------------------------------------------------------------------------
-# Tool input schemas (Pydantic doubles as the validation and prompt layer)
+# Tool inputs
 # ---------------------------------------------------------------------------
 class InspectSchemaInput(BaseModel):
-    """List tables and columns of the attached dataset."""
+    """Optionally narrow the inspection to one table."""
 
-    table: str | None = Field(default=None, description="Restrict output to one table.")
+    table: str | None = None
+
+
+class FindJoinPathInput(BaseModel):
+    """Ask for the shortest FK join chain between two entities."""
+
+    source_table: str
+    target_table: str
 
 
 class ProfileColumnInput(BaseModel):
-    """Compute null ratio, distinct count, top values and numeric statistics."""
-
     table: str
     column: str
     top_k: int = Field(default=8, ge=1, le=50)
 
 
 class RunSqlInput(BaseModel):
-    """Execute one read-only SQL statement through the sandbox."""
-
-    sql: str = Field(min_length=1, description="A single SELECT/WITH/EXPLAIN statement.")
+    sql: str = Field(min_length=1)
 
 
 class ExplainSqlInput(BaseModel):
-    """Show the driver's query plan for a statement."""
-
     sql: str
 
 
 class FinalAnswerInput(BaseModel):
-    """Terminate the loop with an executive summary grounded in observations."""
-
     answer: str
     sql: str | None = None
 
 
 class AgentStep(BaseModel):
-    """One ReAct turn, preserved for audit trails and timeline charts."""
+    """One ReAct turn retained as an audit trail."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -86,7 +93,7 @@ class AgentStep(BaseModel):
 
 
 class AgentResult(BaseModel):
-    """Final outcome of one autonomous analysis run."""
+    """Outcome of one autonomous analysis, including safety telemetry."""
 
     question: str
     answer: str
@@ -94,33 +101,34 @@ class AgentResult(BaseModel):
     success: bool
     iterations: int
     steps: list[AgentStep] = Field(default_factory=list)
-    telemetry: list[str] = Field(default_factory=list)
+    telemetry: list[AgentTelemetry] = Field(default_factory=list)
+    pruned_tables: list[str] = Field(default_factory=list)
+    join_hops: int = 0
+    redactions: RedactionReport | None = None
     elapsed_ms: float = 0.0
 
 
 class AgentParseError(ValueError):
-    """The model's turn was not a valid agent JSON message."""
+    """The model turn was not a valid agent JSON message."""
 
 
 class ProviderError(RuntimeError):
-    """An LLM provider failed, is unconfigured, or its SDK is missing."""
+    """The LLM provider failed, is unconfigured, or its SDK is missing."""
 
 
 # ---------------------------------------------------------------------------
-# Provider interface: one Protocol, three implementations
+# Providers
 # ---------------------------------------------------------------------------
 Message = Mapping[str, str]
 
 
 @runtime_checkable
 class LLMProvider(ProtocolTyping):
-    """Minimal chat-completion contract shared by every backend."""
-
     def complete(self, messages: Sequence[Message]) -> str: ...
 
 
 class OpenAIProvider:
-    """OpenAI Chat Completions adapter (SDK lazily imported, optional extra)."""
+    """OpenAI Chat Completions adapter (SDK imported lazily)."""
 
     def __init__(self, config: LLMConfig) -> None:
         try:
@@ -146,7 +154,7 @@ class OpenAIProvider:
 
 
 class GeminiProvider:
-    """Google Gemini adapter (SDK lazily imported, optional extra)."""
+    """Google Gemini adapter (SDK imported lazily)."""
 
     def __init__(self, config: LLMConfig) -> None:
         try:
@@ -185,7 +193,7 @@ class GeminiProvider:
 
 
 class ScriptedProvider:
-    """Deterministic provider for tests and offline demos; pops queued replies."""
+    """Deterministic provider for tests and offline demos."""
 
     def __init__(self, responses: Sequence[str]) -> None:
         self._responses: deque[str] = deque(responses)
@@ -197,7 +205,6 @@ class ScriptedProvider:
 
 
 def build_provider(config: LLMConfig) -> LLMProvider:
-    """Factory mapping configuration to a concrete provider instance."""
     if config.provider == "gemini":
         return GeminiProvider(config)
     if config.provider == "openai":
@@ -209,18 +216,10 @@ def build_provider(config: LLMConfig) -> LLMProvider:
 
 
 # ---------------------------------------------------------------------------
-# Tool registry
+# Agent
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class _Tool:
-    name: str
-    description: str
-    input_model: type[BaseModel]
-    handler: Callable[[dict[str, Any]], str]
-
-
 class DataWhisperAgent:
-    """Self-correcting SQL analyst bound to one engine and one provider."""
+    """Graph-pruned, cost-gated, PII-safe SQL analyst."""
 
     def __init__(
         self,
@@ -232,72 +231,71 @@ class DataWhisperAgent:
         self._provider = provider
         self._config = config or DataWhisperConfig()
         self._safety = self._config.safety
-        self._tools: dict[str, _Tool] = {
-            "inspect_schema": _Tool(
-                name="inspect_schema",
-                description="List tables and columns of the attached dataset.",
-                input_model=InspectSchemaInput,
-                handler=self._tool_inspect_schema,
-            ),
-            "profile_column": _Tool(
-                name="profile_column",
-                description=(
-                    "Null ratio, distinct count, top values and numeric stats for a column."
-                ),
-                input_model=ProfileColumnInput,
-                handler=self._tool_profile_column,
-            ),
-            "run_sql": _Tool(
-                name="run_sql",
-                description=(
-                    "Execute one read-only SQL statement (SELECT/WITH/EXPLAIN only) "
-                    "and return up to 20 result rows."
-                ),
-                input_model=RunSqlInput,
-                handler=self._tool_run_sql,
-            ),
-            "explain_sql": _Tool(
-                name="explain_sql",
-                description="Show the driver query plan for a statement.",
-                input_model=ExplainSqlInput,
-                handler=self._tool_explain,
-            ),
+        self._graph: SchemaGraph | None = None
+        self._pruned: PrunedSchema | None = None
+        self._tools: dict[str, Callable[[dict[str, Any]], ToolResult]] = {
+            "inspect_schema": self._tool_inspect_schema,
+            "find_join_path": self._tool_find_join_path,
+            "profile_column": self._tool_profile_column,
+            "run_sql": self._tool_run_sql,
+            "explain_sql": self._tool_explain,
         }
 
     # ------------------------------------------------------------------
-    # ReAct loop
+    # Public entry point
     # ------------------------------------------------------------------
     def run(self, question: str) -> AgentResult:
-        """Answer one question, self-healing SQL failures along the way."""
         started = perf_counter()
-        telemetry: list[str] = []
+        telemetry: list[AgentTelemetry] = []
         steps: list[AgentStep] = []
-        sql_failures = 0
+        repair_failures = 0
         format_failures = 0
+        total_redactions = RedactionReport()
 
-        system_prompt = self._system_prompt()
+        try:
+            catalog = self._engine.introspect()
+            self._graph = SchemaGraph(catalog, self._config.schema_graph)
+            self._pruned = self._graph.retrieve(question, self._config.schema_graph.max_tables)
+        except Exception as exc:
+            telemetry.append(
+                AgentTelemetry(stage="schema_graph", outcome="failed", detail=str(exc))
+            )
+            return self._fail(
+                question, telemetry, steps, started, f"Schema retrieval failed: {exc}"
+            )
+
+        telemetry.append(
+            AgentTelemetry(
+                stage="schema_graph",
+                outcome="pruned",
+                detail=f"{len(self._pruned.tables)} of {len(catalog.tables)} tables selected",
+            )
+        )
+        context = self._pruned.render(self._config.schema_graph.max_context_tokens)
+
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"{question}\n\nDataset catalog:\n{self._catalog_digest()}",
-            },
+            {"role": "system", "content": self._system_prompt(context)},
+            {"role": "user", "content": question},
         ]
 
-        for turn in range(self._safety.max_agent_iterations):
+        for _ in range(self._safety.max_agent_iterations):
             try:
                 raw = self._provider.complete(messages)
             except ProviderError as exc:
-                telemetry.append(f"provider failure: {exc}")
+                telemetry.append(
+                    AgentTelemetry(stage="provider", outcome="failed", detail=str(exc))
+                )
                 return self._fail(
                     question, telemetry, steps, started, f"LLM provider failed: {exc}"
                 )
 
             try:
-                parsed_action, parsed_input = self._parse_message(raw)
+                action, payload = self._parse_message(raw)
             except AgentParseError as exc:
                 format_failures += 1
-                telemetry.append(f"unparseable model turn #{turn}: {exc}")
+                telemetry.append(
+                    AgentTelemetry(stage="format", outcome="rejected", detail=str(exc))
+                )
                 if format_failures > 1:
                     return self._fail(
                         question,
@@ -319,17 +317,15 @@ class DataWhisperAgent:
                 )
                 continue
 
-            thought = str(parsed_input.pop("thought", ""))
-            if parsed_action == "final_answer":
+            thought = str(payload.pop("thought", ""))
+
+            if action == "final_answer":
                 try:
-                    final = FinalAnswerInput.model_validate(parsed_input)
+                    final = FinalAnswerInput.model_validate(payload)
                 except ValidationError as exc:
                     messages.append({"role": "assistant", "content": raw})
                     messages.append(
-                        {
-                            "role": "user",
-                            "content": f"[FORMAT ERROR] final_answer payload invalid: {exc}",
-                        }
+                        {"role": "user", "content": f"[FORMAT ERROR] final_answer invalid: {exc}"}
                     )
                     continue
                 return AgentResult(
@@ -340,41 +336,58 @@ class DataWhisperAgent:
                     iterations=len(steps),
                     steps=steps,
                     telemetry=telemetry,
+                    pruned_tables=self._pruned.table_names,
+                    join_hops=self._pruned.join_plan.hops if self._pruned.join_plan else 0,
+                    redactions=total_redactions if total_redactions.total else None,
                     elapsed_ms=round((perf_counter() - started) * 1000, 3),
                 )
 
             step_started = perf_counter()
-            observation = self._dispatch(parsed_action, parsed_input, telemetry)
-            elapsed = round((perf_counter() - step_started) * 1000, 3)
+            observation, redactions = self._dispatch(action, payload, telemetry)
+            if redactions is not None:
+                total_redactions = total_redactions.merge(redactions)
             steps.append(
                 AgentStep(
                     index=len(steps),
                     thought=thought,
-                    action=parsed_action,
-                    action_input=parsed_input,
+                    action=action,
+                    action_input=payload,
                     observation=observation,
-                    elapsed_ms=elapsed,
+                    elapsed_ms=round((perf_counter() - step_started) * 1000, 3),
                 )
             )
 
-            if parsed_action == "run_sql" and observation.startswith("[TOOL ERROR]"):
-                sql_failures += 1
-                if sql_failures > self._safety.max_sql_repair_attempts:
-                    telemetry.append(
-                        f"self-repair budget exhausted after {sql_failures} failed SQL attempts"
+            if (
+                observation.startswith("[SECURITY ERROR]")
+                or observation.startswith("[COST ERROR]")
+                or observation.startswith("[SQL ERROR]")
+                or observation.startswith("[TIMEOUT]")
+            ):
+                repair_failures += 1
+
+            if repair_failures > self._safety.max_sql_repair_attempts:
+                telemetry.append(
+                    AgentTelemetry(
+                        stage="self_healing",
+                        outcome="exhausted",
+                        detail=f"{repair_failures} failed attempts",
                     )
-                    return self._fail(
-                        question,
-                        telemetry,
-                        steps,
-                        started,
-                        f"Gave up after {sql_failures} failed SQL attempts. "
-                        "The sandbox and driver errors are attached in the step history.",
-                    )
+                )
+                return self._fail(
+                    question,
+                    telemetry,
+                    steps,
+                    started,
+                    f"Gave up after {repair_failures} failed attempts. "
+                    "Parser, planner and driver diagnostics are in the step history.",
+                )
 
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": observation[:_MAX_OBSERVATION_CHARS]})
 
+        telemetry.append(
+            AgentTelemetry(stage="loop", outcome="exhausted", detail="iteration budget")
+        )
         return self._fail(
             question,
             telemetry,
@@ -384,133 +397,201 @@ class DataWhisperAgent:
         )
 
     # ------------------------------------------------------------------
-    # Tools (observations are plain strings destined for the next prompt)
+    # Tools
     # ------------------------------------------------------------------
-    def _dispatch(self, action: str, raw_input: dict[str, Any], telemetry: list[str]) -> str:
-        tool = self._tools.get(action)
-        if tool is None:
+    def _dispatch(
+        self, action: str, payload: dict[str, Any], telemetry: list[AgentTelemetry]
+    ) -> tuple[str, RedactionReport | None]:
+        handler = self._tools.get(action)
+        if handler is None:
             known = ", ".join(sorted(self._tools))
-            return f"[TOOL ERROR] unknown action {action!r}; available tools: {known}"
+            return f"[TOOL ERROR] unknown action {action!r}; available: {known}", None
         try:
-            return tool.handler(raw_input)
+            result = handler(payload)
         except ValidationError as exc:
-            return f"[TOOL ERROR] invalid input for {action}: {exc}"
-        except Exception as exc:
-            telemetry.append(f"{action} raised {type(exc).__name__}: {exc}")
-            return f"[TOOL ERROR] {action} failed: {exc}"
-
-    def _tool_inspect_schema(self, raw: dict[str, Any]) -> str:
-        args = InspectSchemaInput.model_validate(raw)
-        snapshot = self._engine.introspect()
-        tables = snapshot.tables
-        if args.table:
-            tables = [t for t in tables if t.name == args.table]
-            if not tables:
-                return f"[TOOL ERROR] unknown table {args.table!r}"
-        payload = {
-            "dialect": snapshot.dialect,
-            "tables": [
-                {
-                    "name": t.name,
-                    "row_count": t.row_count,
-                    "columns": [
-                        {"name": c.name, "type": c.type, "nullable": c.nullable} for c in t.columns
-                    ],
-                }
-                for t in tables
-            ],
-        }
-        return _truncate_payload(payload)
-
-    def _tool_profile_column(self, raw: dict[str, Any]) -> str:
-        args = ProfileColumnInput.model_validate(raw)
-        try:
-            profile = self._engine.profile_column(args.table, args.column, top_k=args.top_k)
-        except ValueError as exc:
-            return f"[TOOL ERROR] profile_column failed: {exc}"
-        return _truncate_payload(profile.model_dump())
-
-    def _tool_run_sql(self, raw: dict[str, Any]) -> str:
-        args = RunSqlInput.model_validate(raw)
-        try:
-            result = self._engine.execute(
-                args.sql,
-                validate=True,
-                timeout_s=self._safety.query_timeout_seconds,
-                max_rows=self._safety.max_rows_returned,
-            )
+            return f"[TOOL ERROR] invalid input for {action}: {exc}", None
         except SQLSecurityError as exc:
-            return f"[TOOL ERROR] run_sql blocked by sandbox: {exc}"
+            telemetry.append(
+                AgentTelemetry(stage=action, outcome="blocked_by_sandbox", detail=str(exc)[:300])
+            )
+            return f"[SECURITY ERROR] {exc}", None
+        except CostViolation as exc:
+            telemetry.append(
+                AgentTelemetry(stage=action, outcome="blocked_by_cost_gate", detail=str(exc)[:300])
+            )
+            cartesian = exc.decision.cartesian_groups
+            hint = (
+                " Add an explicit join predicate between every pair of tables."
+                if cartesian
+                else " Reduce the scanned data or add a selective filter."
+            )
+            return f"[COST ERROR] {exc}.{hint}", None
         except QueryTimeoutError as exc:
-            return f"[TOOL ERROR] run_sql timed out: {exc}"
-        except Exception as exc:  # driver errors feed the self-healing loop
-            return f"[TOOL ERROR] run_sql failed: {exc}"
-        payload = {
-            "columns": result.columns,
-            "row_count": result.row_count,
-            "truncated": result.truncated,
-            "elapsed_ms": result.elapsed_ms,
-            "rows": result.rows[:_MAX_ROWS_IN_OBSERVATION],
-        }
-        return _truncate_payload(payload)
-
-    def _tool_explain(self, raw: dict[str, Any]) -> str:
-        args = ExplainSqlInput.model_validate(raw)
-        try:
-            result = self._engine.explain(args.sql)
+            telemetry.append(AgentTelemetry(stage=action, outcome="timeout", detail=str(exc)))
+            return f"[TIMEOUT] {exc}", None
+        except QueryExecutionError as exc:
+            telemetry.append(AgentTelemetry(stage=action, outcome="driver_error", detail=str(exc)))
+            return f"[SQL ERROR] {exc}", None
         except Exception as exc:
-            return f"[TOOL ERROR] explain_sql failed: {exc}"
-        return _truncate_payload({"plan": result.rows[:_MAX_ROWS_IN_OBSERVATION]})
+            telemetry.append(
+                AgentTelemetry(stage=action, outcome="error", detail=f"{type(exc).__name__}: {exc}")
+            )
+            return f"[TOOL ERROR] {action} failed: {exc}", None
+        if isinstance(result, tuple):
+            return result
+        return result, None
+
+    def _tool_inspect_schema(self, payload: dict[str, Any]) -> str:
+        args = InspectSchemaInput.model_validate(payload)
+        if self._pruned is None:
+            return "[TOOL ERROR] schema graph unavailable"
+        tables = self._pruned.tables
+        if args.table:
+            lowered = args.table.lower()
+            tables = [t for t in tables if t.name.lower() == lowered]
+            if not tables:
+                catalog = self._engine.introspect()
+                full = catalog.table(args.table)
+                if full is None:
+                    return f"[TOOL ERROR] unknown table {args.table!r} in this dataset"
+                return json.dumps(
+                    {
+                        "table": full.name,
+                        "row_count": full.row_count,
+                        "columns": [
+                            {"name": c.name, "type": c.type, "nullable": c.nullable}
+                            for c in full.columns[: self._config.schema_graph.max_columns_per_table]
+                        ],
+                        "note": "table was outside the pruned context; truncated for budget",
+                    }
+                )
+        return json.dumps(
+            {
+                "tables": [
+                    {
+                        "name": t.name,
+                        "row_count": t.row_count,
+                        "columns": [
+                            {
+                                "name": c.name,
+                                "type": c.type,
+                                "pk": c.primary_key,
+                                "fk": c.foreign_key,
+                            }
+                            for c in t.columns
+                        ],
+                    }
+                    for t in tables
+                ],
+                "pruned_from": len(self._engine.introspect().tables),
+            }
+        )[:_MAX_OBSERVATION_CHARS]
+
+    def _tool_find_join_path(self, payload: dict[str, Any]) -> str:
+        args = FindJoinPathInput.model_validate(payload)
+        if self._graph is None:
+            return "[TOOL ERROR] schema graph unavailable"
+        plan = self._graph.shortest_path(args.source_table, args.target_table)
+        if plan is None:
+            return (
+                f"[TOOL ERROR] no FK path between {args.source_table!r} and "
+                f"{args.target_table!r}; use an explicit join key or inspect both tables"
+            )
+        return _truncate(
+            {
+                "tables": plan.tables,
+                "hops": plan.hops,
+                "join_conditions": [step.sql_condition() for step in plan.steps],
+            }
+        )
+
+    def _tool_profile_column(self, payload: dict[str, Any]) -> ToolResult:
+        args = ProfileColumnInput.model_validate(payload)
+        profile = self._engine.profile_column(args.table, args.column, top_k=args.top_k)
+        observation = _truncate(profile.model_dump(exclude={"redactions"}))
+        return observation, profile.redactions or RedactionReport()
+
+    def _tool_run_sql(self, payload: dict[str, Any]) -> ToolResult:
+        args = RunSqlInput.model_validate(payload)
+        result = self._engine.execute(
+            args.sql,
+            validate=True,
+            check_cost=True,
+            timeout_s=self._safety.query_timeout_seconds,
+            max_rows=self._safety.max_rows_returned,
+        )
+        observation = _truncate(
+            {
+                "columns": result.columns,
+                "row_count": result.row_count,
+                "truncated": result.truncated,
+                "elapsed_ms": result.elapsed_ms,
+                "cost_action": result.cost_action,
+                "auto_limit": result.limit_applied,
+                "rows": result.rows[:_MAX_ROWS_IN_OBSERVATION],
+                "pii_redactions": result.redactions.by_category if result.redactions else {},
+            }
+        )
+        return observation, result.redactions or RedactionReport()
+
+    def _tool_explain(self, payload: dict[str, Any]) -> str:
+        args = ExplainSqlInput.model_validate(payload)
+        plan, decision = self._engine.explain(args.sql)
+        return _truncate(
+            {
+                "verdict": decision.action,
+                "allowed": decision.allowed,
+                "reasons": decision.reasons,
+                "estimated_scan_rows": decision.estimated_scan_rows,
+                "full_scans": [
+                    {"table": node.table, "rows": node.estimated_rows} for node in plan.full_scans
+                ],
+                "suggested_limit": decision.rewritten_sql,
+                "plan": [node.model_dump() for node in plan.nodes[:20]],
+            }
+        )
 
     # ------------------------------------------------------------------
-    # Prompt assembly and message parsing
+    # Prompting
     # ------------------------------------------------------------------
-    def _system_prompt(self) -> str:
-        tool_docs = "\n".join(
-            f"- {tool.name}: {tool.description} input_schema="
-            f"{json.dumps(tool.input_model.model_json_schema()['properties'])}"
-            for tool in self._tools.values()
-        )
+    def _system_prompt(self, schema_context: str) -> str:
+        tool_docs = {
+            "inspect_schema": '{"table": "<optional>"}',
+            "find_join_path": '{"source_table": "...", "target_table": "..."}',
+            "profile_column": '{"table": "...", "column": "...", "top_k": 8}',
+            "run_sql": '{"sql": "<single read-only statement>"}',
+            "explain_sql": '{"sql": "<statement>"}',
+        }
+        rendered_tools = "\n".join(f"- {name}: {payload}" for name, payload in tool_docs.items())
         return (
-            f"You are DataWhisper, an autonomous SQL analyst operating against a "
-            f"{self._engine.backend.dialect} database.\n\n"
+            f"You are DataWhisper, a zero-trust SQL analyst for a "
+            f"{self._engine.backend.dialect} dataset.\n\n"
             "Safety contract (absolute):\n"
-            "- Emit only read-only SQL: a single SELECT, WITH...SELECT, or EXPLAIN statement.\n"
-            "- Never use PRAGMA, ATTACH, COPY, INSTALL, file-reading functions, semicolons "
-            "or comments; the sandbox rejects them.\n"
-            "- Never fabricate numbers: every figure in your final answer must come from "
-            "a tool observation.\n\n"
-            f"Available tools:\n{tool_docs}\n\n"
-            "Respond with exactly ONE JSON object per turn:\n"
-            '{"thought": "<brief reasoning>", "action": "<tool_name or final_answer>", '
-            '"action_input": {...}}\n'
-            'For final_answer use {"thought": "...", "action": "final_answer", '
-            '"action_input": {"answer": "<executive summary with concrete numbers>", '
-            '"sql": "<final SQL or null>"}}\n\n'
-            "Workflow: inspect the schema first, profile columns when semantics are "
-            "unclear, then run SQL. If a tool returns [TOOL ERROR], read the driver "
-            "message, fix the SQL and retry. You have at most "
-            f"{self._safety.max_sql_repair_attempts} SQL repair attempts."
+            "- Emit one read-only statement: SELECT, WITH...SELECT, or EXPLAIN.\n"
+            "- No semicolons, comments, PRAGMA/ATTACH/COPY/INSTALL, file readers, "
+            "or catalog-qualified references; the sandbox rejects them.\n"
+            "- The cost gate may reject cartesian joins and may paginate large scans.\n"
+            "- Results are PII-scrubbed before you see them. Never attempt to recover "
+            "redacted values or infer them; treat them as unavailable.\n"
+            "- Every number in the final answer must come from a tool observation.\n\n"
+            f"Only this pruned sub-schema is in scope (selected for this question):\n"
+            f"{schema_context}\n\n"
+            f"Tools (JSON action_input):\n{rendered_tools}\n\n"
+            "Respond with exactly ONE JSON object per turn: "
+            '{"thought": "...", "action": "<tool or final_answer>", "action_input": {...}}\n'
+            'For the final turn: {"thought": "...", "action": "final_answer", '
+            '"action_input": {"answer": "<findings with concrete numbers>", '
+            '"sql": "<SQL or null>"}}\n\n'
+            "If a tool returns [SECURITY ERROR], [COST ERROR], [SQL ERROR] or [TIMEOUT], "
+            "read the diagnostic, fix the statement and retry. You have at most "
+            f"{self._safety.max_sql_repair_attempts} repair attempts."
         )
 
-    def _catalog_digest(self) -> str:
-        try:
-            snapshot = self._engine.introspect()
-        except Exception:
-            return "(catalog unavailable)"
-        lines = []
-        for table in snapshot.tables[:60]:
-            columns = ", ".join(f"{c.name} {c.type}" for c in table.columns[:40])
-            lines.append(f"- {table.name}({columns}) rows={table.row_count}")
-        return "\n".join(lines)[:4000] or "(no tables found)"
-
+    # ------------------------------------------------------------------
+    # Parsing and failure shaping
+    # ------------------------------------------------------------------
     @staticmethod
     def _parse_message(raw: str) -> tuple[str, dict[str, Any]]:
-        """Extract ``(action, action_input)`` from a model turn.
-
-        Tolerates markdown code fences and leading prose; uses a balanced
-        ``raw_decode`` from the first ``{`` so nested braces survive.
-        """
         text = raw.strip()
         if text.startswith("```"):
             text = text.strip("`")
@@ -539,7 +620,7 @@ class DataWhisperAgent:
     def _fail(
         self,
         question: str,
-        telemetry: list[str],
+        telemetry: list[AgentTelemetry],
         steps: list[AgentStep],
         started: float,
         message: str,
@@ -551,11 +632,26 @@ class DataWhisperAgent:
             iterations=len(steps),
             steps=steps,
             telemetry=telemetry,
+            pruned_tables=self._pruned.table_names if self._pruned else [],
+            join_hops=self._pruned.join_plan.hops if self._pruned and self._pruned.join_plan else 0,
             elapsed_ms=round((perf_counter() - started) * 1000, 3),
         )
 
 
-def _truncate_payload(payload: Any) -> str:
-    """Serialize an observation, hard-capped so prompts stay within budget."""
+def _truncate(payload: Any) -> str:
     text = json.dumps(payload, default=str)
     return text[:_MAX_OBSERVATION_CHARS]
+
+
+def join_plan_sql(plan: JoinPlan, left: str, right: str) -> str:
+    """Render a ``FROM``/``JOIN`` fragment for a computed FK path.
+
+    Exposed for the CLI and tests; the agent receives the same information as
+    text through the pruned-schema prompt.
+    """
+    if not plan.steps:
+        return left
+    clauses = [f"FROM {plan.tables[0]}"]
+    for step in plan.steps:
+        clauses.append(f"JOIN {step.right_table} ON {step.sql_condition()}")
+    return " ".join(clauses)
