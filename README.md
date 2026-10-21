@@ -29,7 +29,6 @@ It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and
 No LangChain, no LlamaIndex. The agent is a small ReAct loop in plain Python; every model-produced statement is checked as an AST and passed through an EXPLAIN-based cost gate before execution.
 
 ## What's new in 1.2
-
 | Area | Before | 1.2 |
 | --- | --- | --- |
 | Large schemas | full DDL in the prompt | BM25 retrieval + FK graph + Dijkstra join paths, token-budgeted |
