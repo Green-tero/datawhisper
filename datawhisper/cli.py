@@ -45,6 +45,10 @@ from datawhisper.integrations.github_bot import (
     parse_benchmark_file,
     run_benchmarks,
 )
+from datawhisper.integrations.migration_audit import (
+    MigrationReport,
+    analyze_migration_sql,
+)
 from datawhisper.visualization.dashboard import (
     KpiCard,
     auto_charts,
@@ -436,6 +440,7 @@ def audit(
     client: GitHubClient | None = None
     drift_reports: list[DriftReport] = []
     pii_findings = []
+    migration_reports: list[MigrationReport] = []
 
     try:
         if github_mode:
@@ -460,6 +465,10 @@ def audit(
                     new = client.get_file_content(filename, head)
                     drift_reports.append(compute_drift(old, new, source=filename))
                     pii_findings.extend(analyze_pii_exposure(old, new))
+                    if "migration" in filename.lower():
+                        migration_reports.append(
+                            analyze_migration_sql(new, source=filename)
+                        )
         else:
             old_text = (base_sql or Path()).read_text(encoding="utf-8")
             new_text = (head_sql or Path()).read_text(encoding="utf-8")
@@ -467,6 +476,9 @@ def audit(
                 compute_drift(old_text, new_text, source=(head_sql or Path()).name)
             )
             pii_findings.extend(analyze_pii_exposure(old_text, new_text))
+            migration_reports.append(
+                analyze_migration_sql(new_text, source=(head_sql or Path()).name)
+            )
 
         drift = merge_drifts(drift_reports)
 
@@ -506,6 +518,7 @@ def audit(
             pii=pii_findings,
             benchmarks=benchmarks or None,
             plan_regressions=plan_regressions or None,
+            migrations=migration_reports or None,
             insights=insights,
             pr_number=pr,
             base_ref=base_ref or "",

@@ -31,6 +31,7 @@ from collections.abc import Iterable, Sequence
 from pydantic import BaseModel, Field
 
 from datawhisper.core.config import SchemaGraphConfig
+from datawhisper.core.decision_engine import DecisionEngine
 from datawhisper.core.models import CatalogSnapshot, ForeignKeyInfo, TableInfo
 
 _STOPWORDS = frozenset(
@@ -225,9 +226,11 @@ class SchemaGraph:
         self,
         catalog: CatalogSnapshot,
         config: SchemaGraphConfig | None = None,
+        decision: DecisionEngine | None = None,
     ) -> None:
         self.catalog = catalog
         self.config = config or SchemaGraphConfig()
+        self._decision = decision
         self._tables: dict[str, TableInfo] = {t.name.lower(): t for t in catalog.tables}
         self._adjacency: dict[str, dict[str, JoinStep]] = {}
         self._keys: list[ForeignKeyInfo] = []
@@ -235,6 +238,7 @@ class SchemaGraph:
         self._docs: dict[str, list[str]] = {}
         self._idf: dict[str, float] = {}
         self._avgdl: float = 0.0
+        self._domains: dict[str, list[str]] = {}
         self._build()
 
     # ------------------------------------------------------------------
@@ -277,6 +281,50 @@ class SchemaGraph:
         self._avgdl = (
             sum(len(tokens) for tokens in self._docs.values()) / total_docs if self._docs else 0.0
         )
+        self._build_domains()
+
+    def _build_domains(self) -> None:
+        """Cluster tables into coarse domains by their leading identifier.
+
+        ``billing_invoices`` and ``billing_payments`` share the ``billing``
+        prefix token, so they co-cluster; singleton tables form their own
+        domain. Domains are a *coarse* filter only - lexical matches outside
+        the chosen domains are always re-admitted, so pruning never loses a
+        table the question actually mentions.
+        """
+        buckets: dict[str, list[str]] = {}
+        for name in self._tables:
+            parts = tokenize(name)
+            key = parts[0] if parts else name
+            buckets.setdefault(key, []).append(name)
+        self._domains = dict(sorted(buckets.items()))
+
+    def _domain_filter(self, query: str) -> set[str] | None:
+        """Coarse step: ask System-1 which domains matter for the question.
+
+        Returns the member tables of the selected domains, or ``None`` when
+        pruning is disabled, unavailable, or pointless (fewer than two
+        domains, or the question matched nothing). ``None`` means "no opinion"
+        so callers fall back to plain BM25 ranking.
+        """
+        if not self.config.domain_pruning or self._decision is None:
+            return None
+        if len(self._domains) < 2:
+            return None
+        chosen: list[str] = []
+        remaining = set(self._domains)
+        for _ in range(min(self.config.max_domains, len(remaining))):
+            if not remaining:
+                break
+            result = self._decision.classify_choice(query, sorted(remaining))
+            chosen.append(str(result.value))
+            remaining.discard(str(result.value))
+        members = {table for domain in chosen for table in self._domains.get(domain, [])}
+        # Re-admit any table the question lexically matches regardless of
+        # domain - recall beats compactness at this layer.
+        scores = self.bm25(query)
+        members.update(name for name, score in scores.items() if score > 0)
+        return members or None
 
     def _collect_foreign_keys(self) -> list[ForeignKeyInfo]:
         keys: list[ForeignKeyInfo] = []
@@ -366,21 +414,39 @@ class SchemaGraph:
         scores = self.bm25(query)
         tokens = tokenize(query)
 
+        scope = self._domain_filter(query)
         ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        positive = [name for name, score in ranked if score > 0]
+        positive = [name for name, score in ranked if score > 0 and (scope is None or name in scope)]
         if positive:
             seeds = positive[:limit]
         else:
             # No lexical overlap: prefer well-connected hubs, which are the
             # most likely entry points for exploratory questions.
+            hub_candidates = self._tables if scope is None else (scope & set(self._tables)) or self._tables
             seeds = sorted(
-                self._tables, key=lambda name: (-len(self._adjacency.get(name, {})), name)
+                hub_candidates, key=lambda name: (-len(self._adjacency.get(name, {})), name)
             )[:limit]
 
         plan = self.connect(seeds)
         allowed = limit + self.config.include_neighbor_tables
         selected = list(seeds)
-        for name in plan.tables:
+        # Fine step: System-1 orders the foreign-key path tables by relevance,
+        # so when the hop budget is tight the slots go to the tables a real
+        # decision model judges meaningful first. The heuristic engine has no
+        # evidence either way and returns insertion order, which keeps
+        # connectivity guarantees intact - fail-soft, never fail-disconnected.
+        path_tables = [name for name in plan.tables if name not in selected]
+        if path_tables and self._decision is not None:
+            ranked = [
+                name
+                for name in path_tables
+                if self._decision.decide_boolean(
+                    f"{name} table belongs in this analysis", query
+                ).value
+            ]
+            ranked.extend(name for name in path_tables if name not in ranked)
+            path_tables = ranked
+        for name in path_tables:
             if name not in selected and len(selected) < allowed:
                 selected.append(name)
         # Keep only tables that survived the budget cap, and rebuild the path.

@@ -57,10 +57,13 @@ from datawhisper.core.models import (
     TabularResult,
 )
 from datawhisper.core.privacy import PrivacyScrubber
+from datawhisper.core.decision_engine import build_decision_engine
 from datawhisper.core.security import (
     CostDecision,
     CostGatekeeper,
     CostViolation,
+    SemanticFirewall,
+    SecurityViolation,
     apply_limit,
     validate_or_raise,
 )
@@ -236,6 +239,10 @@ class SQLiteBackend:
             columns = [d[0] for d in cursor.description] if cursor.description else []
             rows = cursor.fetchmany(limit)
         except sqlite3.Error as exc:
+            # Roll back any partial transaction so a failed statement can never
+            # leave the read-only session mid-state for the next caller.
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.rollback()
             raise QueryExecutionError(str(exc), driver="sqlite") from exc
         return TabularResult(columns=columns, _rows=[tuple(row) for row in rows])
 
@@ -618,6 +625,8 @@ class PostgresBackend:
                 columns = [d.name for d in cursor.description] if cursor.description else []
                 rows = cursor.fetchmany(limit)
         except Exception as exc:
+            with contextlib.suppress(Exception):
+                self._conn.rollback()
             raise QueryExecutionError(str(exc), driver="postgres") from exc
         return TabularResult(columns=columns, _rows=[tuple(row) for row in rows])
 
@@ -766,6 +775,9 @@ class ExecutionEngine:
         self.safety: SafetyThresholds = self.config.safety
         self._gatekeeper = CostGatekeeper(self.config.cost)
         self._scrubber = PrivacyScrubber(self.config.privacy)
+        # The statement firewall shares the System-1 engine with the agent so
+        # both surfaces measure identically and none of it touches the network.
+        self._firewall = SemanticFirewall(build_decision_engine(self.config.decision), self.config.decision)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dw-exec")
         self._poisoned = False
         self._catalog: CatalogSnapshot | None = None
@@ -816,19 +828,26 @@ class ExecutionEngine:
         *,
         validate: bool = True,
         check_cost: bool = True,
+        firewall: bool = True,
         timeout_s: float | None = None,
         max_rows: int | None = None,
         scrub: bool = True,
     ) -> QueryResult:
         """Validate, gate, execute and scrub one statement.
 
-        Raises :class:`SQLSecurityError` (AST), :class:`CostViolation` (budget)
-        or :class:`QueryTimeoutError`/``QueryExecutionError`` (driver). All are
+        Raises :class:`SecurityViolation` (semantic firewall),
+        :class:`SQLSecurityError` (AST), :class:`CostViolation` (budget) or
+        :class:`QueryTimeoutError`/``QueryExecutionError`` (driver). All are
         fed back to the agent as observations for self-correction.
         """
         if self._poisoned:
             raise QueryTimeoutError("engine was abandoned after a previous timeout")
 
+        # Fast path first: destructive intent is caught in microseconds, even
+        # for inputs that would be expensive to parse, and the AST remains the
+        # semantic authority for everything that survives.
+        if firewall:
+            self._firewall.check_statement(sql)
         statement = sql
         if validate:
             statement = validate_or_raise(sql, self.backend.dialect).sql

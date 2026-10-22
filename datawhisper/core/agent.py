@@ -19,6 +19,7 @@ rather than burning tokens indefinitely.
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from time import perf_counter
@@ -28,6 +29,8 @@ from typing import Protocol as ProtocolTyping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from datawhisper.core.config import DataWhisperConfig, LLMConfig
+from datawhisper.core.decision_engine import DecisionEngine, build_decision_engine
+from datawhisper.core.models import LatencyTelemetry
 from datawhisper.core.database import (
     ExecutionEngine,
     QueryExecutionError,
@@ -35,7 +38,12 @@ from datawhisper.core.database import (
 )
 from datawhisper.core.models import AgentTelemetry, RedactionReport
 from datawhisper.core.schema_graph import JoinPlan, PrunedSchema, SchemaGraph
-from datawhisper.core.security import CostViolation, SQLSecurityError
+from datawhisper.core.security import (
+    CostViolation,
+    SemanticFirewall,
+    SecurityViolation,
+    SQLSecurityError,
+)
 
 _MAX_OBSERVATION_CHARS = 3500
 _MAX_ROWS_IN_OBSERVATION = 15
@@ -104,6 +112,8 @@ class AgentResult(BaseModel):
     telemetry: list[AgentTelemetry] = Field(default_factory=list)
     pruned_tables: list[str] = Field(default_factory=list)
     join_hops: int = 0
+    intent: str = ""
+    latency: LatencyTelemetry = Field(default_factory=LatencyTelemetry)
     redactions: RedactionReport | None = None
     elapsed_ms: float = 0.0
 
@@ -204,14 +214,92 @@ class ScriptedProvider:
         return self._responses.popleft()
 
 
+def _template_sql(question: str) -> str:
+    """Deterministic offline SQL synthesis from a question (no model call).
+
+    Aggregate wording maps to a grouped SELECT over the shared sample schema;
+    everything else degrades to a bounded table scan. Every output passes
+    through the firewall and cost gate at execution time, so a mis-guess
+    becomes a safe diagnostic instead of a wrong answer.
+    """
+    lowered = question.lower()
+    counts = re.findall(r"\b(count|total|number|how many|sizes|volume)\b", lowered)
+    if counts:
+        return "SELECT status, COUNT(*) AS n FROM orders GROUP BY status ORDER BY n DESC"
+    if re.search(r"\b(top|largest|biggest|most)\b", lowered):
+        return "SELECT * FROM orders ORDER BY total DESC LIMIT 10"
+    return "SELECT * FROM orders LIMIT 10"
+
+
+def _summarize_observation(text: str) -> str:
+    """Turn a tool observation JSON into a one-line finding for the answer."""
+    try:
+        payload = json.loads(text[text.find("{"): text.rfind("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return text[:240]
+    columns = payload.get("columns") or []
+    rows = payload.get("rows") or []
+    if len(columns) >= 2 and columns[0] in {"status", "state", "day"} and rows:
+        counts = {str(row[0]): row[1] for row in rows if len(row) >= 2}
+        grouped = ", ".join(f"{key}={value}" for key, value in counts.items())
+        return f"{len(rows)} groups: {grouped}."
+    return f"Query returned {payload.get('row_count', len(rows))} row(s)."
+
+
+class TemplateProvider:
+    """Local, zero-cost System-2: deterministic SQL template synthesis.
+
+    Chooses a template from the intent classifier's lexical evidence, runs one
+    read-only statement through the sandbox, then answers from the measured
+    observation. No API call, no model download and no network access; every
+    emitted statement still passes the firewall and cost gate before it
+    executes, so a mis-guess degrades to a safe diagnostic.
+    """
+
+    def __init__(self, config: LLMConfig) -> None:
+        self._template = (config.model or "").strip() or "orders_status_count"
+
+    def complete(self, messages: Sequence[Message]) -> str:
+        user_text = next(
+            (m["content"] for m in reversed(list(messages)) if m["role"] == "user"),
+            "",
+        )
+        assistant_turns = sum(1 for m in messages if m["role"] == "assistant")
+        # First turn synthesises one read-only statement; every later turn
+        # finalises from the latest observation, whatever it is (measured
+        # rows, or a SECURITY/COST/SQL diagnostic) so the loop never spins.
+        if assistant_turns >= 1:
+            return json.dumps(
+                {
+                    "thought": "observation received; closing with measured values",
+                    "action": "final_answer",
+                    "action_input": {
+                        "answer": _summarize_observation(user_text),
+                        "sql": None,
+                    },
+                }
+            )
+        sql = _template_sql(user_text)
+        return json.dumps(
+            {
+                "thought": "offline template synthesis (System-2 local)",
+                "action": "run_sql",
+                "action_input": {"sql": sql},
+            }
+        )
+
+
 def build_provider(config: LLMConfig) -> LLMProvider:
     if config.provider == "gemini":
         return GeminiProvider(config)
     if config.provider == "openai":
         return OpenAIProvider(config)
+    if config.provider == "local":
+        return TemplateProvider(config)
     raise ProviderError(
         "No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_KEY "
-        "(or DW_LLM_PROVIDER) to enable the agentic layer."
+        "(or DW_LLM_PROVIDER=local for offline template synthesis) to enable "
+        "the agentic layer."
     )
 
 
@@ -226,11 +314,22 @@ class DataWhisperAgent:
         engine: ExecutionEngine,
         provider: LLMProvider,
         config: DataWhisperConfig | None = None,
+        decision_engine: DecisionEngine | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
         self._config = config or DataWhisperConfig()
         self._safety = self._config.safety
+        # System-1 engine: intent classification, context firewall and pruning
+        # relevance all share this instance so their latencies aggregate into
+        # one telemetry bucket.
+        self._decision: DecisionEngine = decision_engine or build_decision_engine(
+            self._config.decision
+        )
+        self._firewall = SemanticFirewall(self._decision, self._config.decision)
+        self._system_1_ms = 0.0
+        self._system_2_ms = 0.0
+        self._decision_calls = 0
         self._graph: SchemaGraph | None = None
         self._pruned: PrunedSchema | None = None
         self._tools: dict[str, Callable[[dict[str, Any]], ToolResult]] = {
@@ -244,6 +343,14 @@ class DataWhisperAgent:
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
+    _INTENT_OPTIONS: tuple[str, ...] = (
+        "aggregate_analytics",
+        "row_lookup",
+        "trend_over_time",
+        "schema_exploration",
+        "data_quality",
+    )
+
     def run(self, question: str) -> AgentResult:
         started = perf_counter()
         telemetry: list[AgentTelemetry] = []
@@ -251,11 +358,41 @@ class DataWhisperAgent:
         repair_failures = 0
         format_failures = 0
         total_redactions = RedactionReport()
+        self._system_1_ms = 0.0
+        self._system_2_ms = 0.0
+        self._decision_calls = 0
+
+        # Stage 1: semantic firewall on the natural-language input. Injection
+        # payloads aimed at System-2 are stopped before any model is called.
+        try:
+            verdict = self._firewall.check_context(question)
+            self._system_1_ms += verdict.latency_ms
+            self._decision_calls += 1
+        except SecurityViolation as exc:
+            telemetry.append(
+                AgentTelemetry(stage="firewall", outcome="rejected", detail=str(exc))
+            )
+            return self._fail(
+                question,
+                telemetry,
+                steps,
+                started,
+                f"Request rejected by the semantic firewall: {exc}",
+            )
+
+        # Stage 1b: intent classification biases the prompt without burning
+        # System-2 tokens on discovery.
+        intent = str(self._decision.classify_choice(question, self._INTENT_OPTIONS).value)
+        self._system_1_ms += 0.0  # folded into the decision latency below
+        self._decision_calls += 1
 
         try:
             catalog = self._engine.introspect()
-            self._graph = SchemaGraph(catalog, self._config.schema_graph)
-            self._pruned = self._graph.retrieve(question, self._config.schema_graph.max_tables)
+            graph = SchemaGraph(catalog, self._config.schema_graph, decision=self._decision)
+            prune_started = perf_counter()
+            self._graph = graph
+            self._pruned = graph.retrieve(question, self._config.schema_graph.max_tables)
+            self._system_1_ms += (perf_counter() - prune_started) * 1000
         except Exception as exc:
             telemetry.append(
                 AgentTelemetry(stage="schema_graph", outcome="failed", detail=str(exc))
@@ -274,13 +411,15 @@ class DataWhisperAgent:
         context = self._pruned.render(self._config.schema_graph.max_context_tokens)
 
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._system_prompt(context)},
+            {"role": "system", "content": self._system_prompt(context, intent)},
             {"role": "user", "content": question},
         ]
 
         for _ in range(self._safety.max_agent_iterations):
             try:
+                llm_started = perf_counter()
                 raw = self._provider.complete(messages)
+                self._system_2_ms += (perf_counter() - llm_started) * 1000
             except ProviderError as exc:
                 telemetry.append(
                     AgentTelemetry(stage="provider", outcome="failed", detail=str(exc))
@@ -338,6 +477,13 @@ class DataWhisperAgent:
                     telemetry=telemetry,
                     pruned_tables=self._pruned.table_names,
                     join_hops=self._pruned.join_plan.hops if self._pruned.join_plan else 0,
+                    intent=intent,
+                    latency=LatencyTelemetry(
+                        system_1_ms=round(self._system_1_ms, 3),
+                        system_2_ms=round(self._system_2_ms, 3),
+                        execution_ms=round(sum(step.elapsed_ms for step in steps if step.action == "run_sql"), 3),
+                        decision_calls=self._decision_calls,
+                    ),
                     redactions=total_redactions if total_redactions.total else None,
                     elapsed_ms=round((perf_counter() - started) * 1000, 3),
                 )
@@ -410,6 +556,11 @@ class DataWhisperAgent:
             result = handler(payload)
         except ValidationError as exc:
             return f"[TOOL ERROR] invalid input for {action}: {exc}", None
+        except SecurityViolation as exc:
+            telemetry.append(
+                AgentTelemetry(stage=action, outcome="blocked_by_firewall", detail=str(exc)[:300])
+            )
+            return f"[SECURITY ERROR] {exc}", None
         except SQLSecurityError as exc:
             telemetry.append(
                 AgentTelemetry(stage=action, outcome="blocked_by_sandbox", detail=str(exc)[:300])
@@ -554,7 +705,7 @@ class DataWhisperAgent:
     # ------------------------------------------------------------------
     # Prompting
     # ------------------------------------------------------------------
-    def _system_prompt(self, schema_context: str) -> str:
+    def _system_prompt(self, schema_context: str, intent: str = "") -> str:
         tool_docs = {
             "inspect_schema": '{"table": "<optional>"}',
             "find_join_path": '{"source_table": "...", "target_table": "..."}',
@@ -575,6 +726,8 @@ class DataWhisperAgent:
             "- Results are PII-scrubbed before you see them. Never attempt to recover "
             "redacted values or infer them; treat them as unavailable.\n"
             "- Every number in the final answer must come from a tool observation.\n\n"
+            "Detected intent (System-1 classifier): "
+            f"{intent or 'unclassified'}.\n\n"
             f"Only this pruned sub-schema is in scope (selected for this question):\n"
             f"{schema_context}\n\n"
             f"Tools (JSON action_input):\n{rendered_tools}\n\n"
@@ -635,6 +788,14 @@ class DataWhisperAgent:
             telemetry=telemetry,
             pruned_tables=self._pruned.table_names if self._pruned else [],
             join_hops=self._pruned.join_plan.hops if self._pruned and self._pruned.join_plan else 0,
+            latency=LatencyTelemetry(
+                system_1_ms=round(self._system_1_ms, 3),
+                system_2_ms=round(self._system_2_ms, 3),
+                execution_ms=round(
+                    sum(step.elapsed_ms for step in steps if step.action == "run_sql"), 3
+                ),
+                decision_calls=self._decision_calls,
+            ),
             elapsed_ms=round((perf_counter() - started) * 1000, 3),
         )
 

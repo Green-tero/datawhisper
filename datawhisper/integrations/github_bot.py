@@ -25,6 +25,12 @@ from sqlglot import exp
 from datawhisper.core.database import ExecutionEngine
 from datawhisper.core.models import PlanInfo
 from datawhisper.core.privacy import PiiCategory, PrivacyScrubber, column_category
+from datawhisper.integrations.migration_audit import (
+    MigrationFinding,
+    MigrationReport,
+    analyze_migration_sql,
+    render_migration_report,
+)
 
 COMMENT_MARKER = "<!-- datawhisper:audit -->"
 _GITHUB_API_VERSION = "2022-11-28"
@@ -378,6 +384,18 @@ def unicode_bar(value: float, maximum: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def _flatten_migration_findings(
+    reports: Sequence[MigrationReport] | None,
+) -> list[MigrationFinding]:
+    """All findings across migration files, for blocking verdict and badges."""
+    if not reports:
+        return []
+    flattened: list[MigrationFinding] = []
+    for report in reports:
+        flattened.extend(report.findings)
+    return flattened
+
+
 def _badge(label: str, count: int) -> str:
     icon = "🟢" if count == 0 else "🔴"
     return f"{icon} **{label}:** {count}"
@@ -389,6 +407,7 @@ def format_audit_report(
     pii: Sequence[PiiExposure] | None = None,
     benchmarks: Sequence[BenchmarkResult] | None = None,
     plan_regressions: Sequence[PlanRegression] | None = None,
+    migrations: Sequence[MigrationReport] | None = None,
     insights: str | None = None,
     pr_number: int | None = None,
     base_ref: str = "",
@@ -404,8 +423,15 @@ def format_audit_report(
     bench_list = list(benchmarks or [])
     drift = drift or DriftReport()
 
+    migration_findings = _flatten_migration_findings(migrations)
+    migration_section = render_migration_report(list(migrations or []))
     benchmark_regressions = sum(1 for b in bench_list if b.regression)
-    blocking = bool(pii_findings) or bool(regressions) or benchmark_regressions > 0
+    blocking = (
+        bool(pii_findings)
+        or bool(regressions)
+        or benchmark_regressions > 0
+        or bool(migration_findings)
+    )
 
     lines: list[str] = [COMMENT_MARKER, "## 🛡️ DataWhisper Governance Report", ""]
     context = [f"**PR #{pr_number}**" if pr_number else "**Local audit**"]
@@ -416,7 +442,8 @@ def format_audit_report(
     lines.append("")
 
     verdict = (
-        "🔴 **Review required** — sensitive columns, plan regressions or latency drift detected."
+        "🔴 **Review required** — sensitive columns, destructive migrations, plan "
+        "regressions or latency drift detected."
         if blocking
         else "🟢 **No blocking findings** — schema, privacy and plan checks passed."
     )
@@ -427,6 +454,7 @@ def format_audit_report(
             [
                 _badge("drifted tables", len(drift.tables) + len(drift.added_tables)),
                 _badge("PII columns", len(pii_findings)),
+                _badge("migration findings", len(migration_findings)),
                 _badge("plan regressions", len(regressions)),
                 _badge("latency regressions", benchmark_regressions),
             ]
@@ -493,6 +521,11 @@ def format_audit_report(
     lines.append("")
     lines.append("</details>")
     lines.append("")
+
+    # --- Static migration audit (lock risk / drops / FK indexes) ----
+    if migration_section:
+        lines.append(migration_section.rstrip())
+        lines.append("")
 
     # --- Plans + benchmarks -------------------------------------------
     lines.append("<details>")

@@ -14,9 +14,23 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ProviderName = Literal["gemini", "openai", "none"]
+ProviderName = Literal["gemini", "openai", "local", "none"]
+DecisionProvider = Literal["auto", "heuristic", "onnx", "http"]
 RedactionMode = Literal["hash", "mask", "tokenize", "redact"]
 PlanFailurePolicy = Literal["allow_with_budget", "reject"]
+
+
+class DecisionConfig(BaseModel):
+    """System-1 decision engine selection and firewall enforcement."""
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: DecisionProvider = "auto"
+    model_path: str = ""
+    endpoint: str = ""
+    request_timeout: float = Field(default=0.25, gt=0)
+    risk_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    firewall_enabled: bool = True
 
 
 class SafetyThresholds(BaseModel):
@@ -78,6 +92,11 @@ class SchemaGraphConfig(BaseModel):
     max_context_tokens: int = Field(default=1500, ge=200)
     bm25_k1: float = Field(default=1.5, gt=0)
     bm25_b: float = Field(default=0.75, ge=0, le=1)
+    domain_pruning: bool = Field(
+        default=True,
+        description="Coarse-to-fine: pick domains first, then BM25 within them.",
+    )
+    max_domains: int = Field(default=3, ge=1, le=20)
 
 
 class LLMConfig(BaseModel):
@@ -113,6 +132,7 @@ class DataWhisperConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    decision: DecisionConfig = Field(default_factory=DecisionConfig)
     safety: SafetyThresholds = Field(default_factory=SafetyThresholds)
     cost: CostPolicy = Field(default_factory=CostPolicy)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
@@ -171,7 +191,20 @@ class DataWhisperConfig(BaseModel):
             if column.strip()
         )
 
+        decision_provider = source.get("DW_DECISION_PROVIDER", "auto").strip().lower()
+        if decision_provider not in {"auto", "heuristic", "onnx", "http"}:
+            decision_provider = "auto"
+        risk_threshold = _float("DW_RISK_THRESHOLD", 0.7)
+
         return cls(
+            decision=DecisionConfig(
+                provider=decision_provider,  # type: ignore[arg-type]
+                model_path=source.get("DW_DECISION_MODEL_PATH", ""),
+                endpoint=source.get("DW_LAYA_ENDPOINT", ""),
+                request_timeout=_float("DW_DECISION_TIMEOUT", 0.25),
+                risk_threshold=min(max(risk_threshold, 0.0), 1.0),
+                firewall_enabled=_bool("DW_FIREWALL_ENABLED", True),
+            ),
             llm=LLMConfig(
                 provider=provider,  # type: ignore[arg-type]
                 model=source.get("DW_LLM_MODEL", ""),

@@ -4,11 +4,11 @@ DataWhisper answers questions about your data and reviews database changes in pu
 
 It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits and data masking stay in code you can read.
 
-**Current release: 1.2.2.** See [CHANGELOG.md](CHANGELOG.md).
+**Current release: 1.3.8.** See [CHANGELOG.md](CHANGELOG.md).
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Release](https://img.shields.io/badge/release-1.2.2-blue)
+![Release](https://img.shields.io/badge/release-1.3.8-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **Language / زبان:** open a section below. English is open by default.
@@ -307,7 +307,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 **۲. ناظر Pull Request.** روی PRهایی که SQL، مهاجرت یا فایل داده را تغییر می‌دهند، بات دریفت اسکیما در سطح ستون، ستون‌های حساس تازه‌معرفی‌شده، افت کارایی پلن (تبدیل جست‌وجوی ایندکس به اسکن کامل) و کندی کوئری‌ها را گزارش می‌کند و یک کامنت چسبان را به‌روز می‌کند. گزارش تعاملی Plotly هم به‌صورت artifact بارگذاری می‌شود.
 
-**نسخه فعلی: ۱.۲.۲.** تغییرات را در [CHANGELOG.md](CHANGELOG.md) ببینید.
+**نسخه فعلی: ۱.۳.۸.** تغییرات را در [CHANGELOG.md](CHANGELOG.md) ببینید.
 
 خبری از LangChain یا LlamaIndex نیست. عامل یک حلقه‌ی ReAct کوچک با پایتون ساده است و هر دستور تولیدشده توسط مدل، پیش از اجرا از بررسی AST و دروازه‌ی هزینه مبتنی بر EXPLAIN عبور می‌کند.
 

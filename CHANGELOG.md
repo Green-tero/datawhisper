@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.3.8] - 2026-10-22
+
+### Added
+
+- `core/decision_engine.py`: System-1 decision engine with heuristic, ONNX and
+  local-HTTP backends (sub-40ms local judgments; heuristic default keeps the
+  pipeline fully offline).
+- Dual-speed security firewall: fast semantic risk scoring ahead of the
+  symbolic AST pass.
+- Coarse-to-fine schema pruning via domain classification.
+- Intent classification folded into the agent prompt.
+- Latency telemetry split (`system_1_ms` / `system_2_ms` / `execution_ms`).
+- IP-address detection and redaction in the privacy engine.
+- Offline System-2: `local` LLM provider synthesises read-only SQL from
+  deterministic templates, runs it through the sandbox, and answers from the
+  measured observation — no API key, model download or network required.
+- Static migration audit (`integrations/migration_audit.py`): lock risk,
+  destructive drops and missing FK indexes per migration file, rendered in
+  the governance report and contributing to the blocking verdict.
+
+### Changed
+
+- `schema_graph.py`, `security.py`, `privacy.py`, `agent.py` accept an optional
+  decision engine with zero behavioural change when it is not configured.
+- The audit CLI and PR bot now run the migration static checks on every
+  `migrations/**` SQL file and fold the findings into the sticky report.
+
 All notable changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 

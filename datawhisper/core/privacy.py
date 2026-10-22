@@ -33,6 +33,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from datawhisper.core.config import PrivacyConfig
+from datawhisper.core.decision_engine import DecisionEngine
 from datawhisper.core.models import RedactionReport
 
 
@@ -45,6 +46,7 @@ class PiiCategory(StrEnum):
     PHONE = "PHONE"
     API_KEY = "API_KEY"
     JWT = "JWT"
+    IP_ADDRESS = "IP_ADDRESS"
 
 
 class PiiMatch(BaseModel):
@@ -80,6 +82,11 @@ _API_KEY = re.compile(
     r")"
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\b")
+# Octet-bounded IPv4; the lookarounds keep dotted version strings out.
+_IP = re.compile(
+    r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\d.])"
+)
 
 #: Column names that imply sensitivity even when every sampled value looks
 #: innocuous. Matching is token-based (``user_email`` matches ``email``).
@@ -108,6 +115,10 @@ _SENSITIVE_COLUMN_TOKENS: dict[str, PiiCategory] = {
     "password": PiiCategory.API_KEY,
     "passwd": PiiCategory.API_KEY,
     "jwt": PiiCategory.JWT,
+    "ip": PiiCategory.IP_ADDRESS,
+    "ip_address": PiiCategory.IP_ADDRESS,
+    "inet": PiiCategory.IP_ADDRESS,
+    "host_ip": PiiCategory.IP_ADDRESS,
 }
 
 
@@ -199,6 +210,16 @@ def detect_pii(value: str) -> list[PiiMatch]:
             )
         )
 
+    for match in _IP.finditer(value):
+        candidates.append(
+            PiiMatch(
+                category=PiiCategory.IP_ADDRESS,
+                value=match.group(0),
+                start=match.start(),
+                end=match.end(),
+            )
+        )
+
     candidates.sort(key=lambda m: (m.start, -(m.end - m.start)))
     accepted: list[PiiMatch] = []
     cursor = -1
@@ -227,11 +248,44 @@ class PrivacyScrubber:
       pseudonyms comparable between CI runs.
     """
 
-    def __init__(self, config: PrivacyConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PrivacyConfig | None = None,
+        decision: DecisionEngine | None = None,
+    ) -> None:
         self.config = config or PrivacyConfig()
         self._allow = {name.lower() for name in self.config.column_allowlist}
         self._tokens: dict[tuple[PiiCategory, str], str] = {}
         self._counters: dict[PiiCategory, int] = {}
+        # Optional System-1 classifier: identifiers the exact token map does
+        # not know are judged locally by the decision engine. The static map
+        # always wins - it is exact and free - so the engine only settles
+        # unfamiliar names, and its verdicts are cached per column.
+        self._decision = decision
+        self._classification_cache: dict[str, PiiCategory | None] = {}
+
+    def classify_column(self, name: str) -> PiiCategory | None:
+        """Classify a column name: exact map first, then the decision engine.
+
+        The heuristic engine answers "non-sensitive" when a name shares no
+        evidence with any known category, which keeps false positives at zero
+        while still catching disguised names like ``contact_info`` once real
+        System-1 weights are configured.
+        """
+        exact = column_category(name)
+        if exact is not None or name in self._classification_cache:
+            return self._classification_cache.get(name, exact)
+        verdict: PiiCategory | None = None
+        if self._decision is not None:
+            options = [category.value for category in PiiCategory] + ["NON_SENSITIVE"]
+            choice = self._decision.classify_choice(name, options)
+            if choice.value != "NON_SENSITIVE":
+                try:
+                    verdict = PiiCategory(str(choice.value))
+                except ValueError:
+                    verdict = None
+        self._classification_cache[name] = verdict
+        return verdict
 
     def scrub(
         self, columns: Sequence[str], rows: Iterable[Sequence[Any]]
@@ -245,7 +299,7 @@ class PrivacyScrubber:
         for column in columns:
             allowed = column.lower() in self._allow
             column_allowed.append(allowed)
-            column_categories.append(None if allowed else column_category(column))
+            column_categories.append(None if allowed else self.classify_column(column))
 
         scrubbed: list[list[Any]] = []
         by_category: dict[str, int] = {}
@@ -353,6 +407,8 @@ class PrivacyScrubber:
 
 def _mask(category: PiiCategory, value: str) -> str:
     """Format-preserving mask that keeps just enough for human verification."""
+    if category is PiiCategory.IP_ADDRESS:
+        return "0.0.0.0"
     digits = re.sub(r"\D", "", value)
     if category is PiiCategory.EMAIL and "@" in value:
         local, _, domain = value.partition("@")

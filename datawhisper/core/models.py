@@ -191,6 +191,21 @@ class TabularResult:
         return pl.from_arrow(self.to_arrow())
 
 
+class LatencyTelemetry(BaseModel):
+    """Dual-speed latency split for one autonomous run.
+
+    ``system_1_ms`` covers local decision-engine work (intent, firewall,
+    pruning relevance); ``system_2_ms`` covers LLM synthesis; ``execution_ms``
+    covers sandboxed SQL runs. Engine-internal statement checks are sub-
+    millisecond and included in ``system_1_ms`` when measured agent-side.
+    """
+
+    system_1_ms: float = 0.0
+    system_2_ms: float = 0.0
+    execution_ms: float = 0.0
+    decision_calls: int = 0
+
+
 class AgentTelemetry(BaseModel):
     """One self-healing event, kept for CI diagnostics and dashboards."""
 
