@@ -15,7 +15,7 @@ from datawhisper.core.database import (
     SQLiteBackend,
 )
 from datawhisper.core.models import CatalogSnapshot, ColumnInfo, PlanInfo, TableInfo
-from datawhisper.core.security import CostViolation, SQLSecurityError, SecurityViolation
+from datawhisper.core.security import CostViolation, SecurityViolation, SQLSecurityError
 
 
 def _turn(action: str, **payload: object) -> str:

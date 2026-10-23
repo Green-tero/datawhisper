@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from datawhisper.core.agent import DataWhisperAgent, ScriptedProvider
 from datawhisper.core.config import DataWhisperConfig, DecisionConfig
 from datawhisper.core.decision_engine import (
@@ -14,7 +13,7 @@ from datawhisper.core.decision_engine import (
     build_decision_engine,
 )
 from datawhisper.core.models import LatencyTelemetry
-from datawhisper.core.security import SemanticFirewall, SecurityViolation
+from datawhisper.core.security import SecurityViolation, SemanticFirewall
 from tests.test_agent_and_engines import _final, _turn
 
 

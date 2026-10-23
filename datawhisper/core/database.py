@@ -45,6 +45,7 @@ from urllib.parse import quote
 from pydantic import BaseModel, Field
 
 from datawhisper.core.config import DataWhisperConfig, SafetyThresholds
+from datawhisper.core.decision_engine import build_decision_engine
 from datawhisper.core.models import (
     CatalogSnapshot,
     ColumnInfo,
@@ -57,13 +58,11 @@ from datawhisper.core.models import (
     TabularResult,
 )
 from datawhisper.core.privacy import PrivacyScrubber
-from datawhisper.core.decision_engine import build_decision_engine
 from datawhisper.core.security import (
     CostDecision,
     CostGatekeeper,
     CostViolation,
     SemanticFirewall,
-    SecurityViolation,
     apply_limit,
     validate_or_raise,
 )
@@ -777,7 +776,9 @@ class ExecutionEngine:
         self._scrubber = PrivacyScrubber(self.config.privacy)
         # The statement firewall shares the System-1 engine with the agent so
         # both surfaces measure identically and none of it touches the network.
-        self._firewall = SemanticFirewall(build_decision_engine(self.config.decision), self.config.decision)
+        self._firewall = SemanticFirewall(
+            build_decision_engine(self.config.decision), self.config.decision
+        )
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dw-exec")
         self._poisoned = False
         self._catalog: CatalogSnapshot | None = None

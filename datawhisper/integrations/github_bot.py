@@ -28,7 +28,6 @@ from datawhisper.core.privacy import PiiCategory, PrivacyScrubber, column_catego
 from datawhisper.integrations.migration_audit import (
     MigrationFinding,
     MigrationReport,
-    analyze_migration_sql,
     render_migration_report,
 )
 

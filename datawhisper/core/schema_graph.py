@@ -416,13 +416,17 @@ class SchemaGraph:
 
         scope = self._domain_filter(query)
         ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        positive = [name for name, score in ranked if score > 0 and (scope is None or name in scope)]
+        positive = [
+            name for name, score in ranked if score > 0 and (scope is None or name in scope)
+        ]
         if positive:
             seeds = positive[:limit]
         else:
             # No lexical overlap: prefer well-connected hubs, which are the
             # most likely entry points for exploratory questions.
-            hub_candidates = self._tables if scope is None else (scope & set(self._tables)) or self._tables
+            hub_candidates = (
+                self._tables if scope is None else (scope & set(self._tables)) or self._tables
+            )
             seeds = sorted(
                 hub_candidates, key=lambda name: (-len(self._adjacency.get(name, {})), name)
             )[:limit]
@@ -437,15 +441,15 @@ class SchemaGraph:
         # connectivity guarantees intact - fail-soft, never fail-disconnected.
         path_tables = [name for name in plan.tables if name not in selected]
         if path_tables and self._decision is not None:
-            ranked = [
+            ranked_names = [
                 name
                 for name in path_tables
                 if self._decision.decide_boolean(
                     f"{name} table belongs in this analysis", query
                 ).value
             ]
-            ranked.extend(name for name in path_tables if name not in ranked)
-            path_tables = ranked
+            ranked_names.extend(name for name in path_tables if name not in ranked_names)
+            path_tables = ranked_names
         for name in path_tables:
             if name not in selected and len(selected) < allowed:
                 selected.append(name)

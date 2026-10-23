@@ -19,8 +19,7 @@ plus lexical rules, which keeps them deterministic, air-gapped and usable in
 
 from __future__ import annotations
 
-import re
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import sqlglot
 from pydantic import BaseModel, Field
@@ -213,9 +212,9 @@ def _scan_alter_table(
     # Lock risk on any ADD COLUMN with a default or type rewrite: SQLite and
     # Postgres both rewrite tables for some type changes.
     for action in statement.args.get("actions") or []:
-        if isinstance(action, exp.ColumnDef) and action.args.get("kind") is not None:
-            kind = action.args.get("kind").sql().upper()
-            if kind.startswith(("SET DATA TYPE", "TYPE")):
+        if isinstance(action, exp.ColumnDef):
+            kind = action.args.get("kind")
+            if kind is not None and kind.sql().upper().startswith(("SET DATA TYPE", "TYPE")):
                 report.findings.append(
                     MigrationFinding(
                         kind="lock_risk",
@@ -242,7 +241,7 @@ def _scan_create_table(
         references = [
             constraint
             for constraint in constraints
-            if isinstance(constraint, exp.ForeignKey) or isinstance(constraint, exp.Reference)
+            if isinstance(constraint, (exp.ForeignKey, exp.Reference))
         ]
         if not references:
             continue
@@ -294,10 +293,7 @@ def render_migration_report(reports: Sequence[MigrationReport]) -> str:
         lines.append(
             _markdown_table(
                 ["Severity", "Signal", "Detail"],
-                [
-                    ["🟡 warning", "lock risk", finding.message]
-                    for finding in merged.locks
-                ],
+                [["🟡 warning", "lock risk", finding.message] for finding in merged.locks],
             )
         )
         lines.append("")

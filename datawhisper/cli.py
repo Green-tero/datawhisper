@@ -466,9 +466,7 @@ def audit(
                     drift_reports.append(compute_drift(old, new, source=filename))
                     pii_findings.extend(analyze_pii_exposure(old, new))
                     if "migration" in filename.lower():
-                        migration_reports.append(
-                            analyze_migration_sql(new, source=filename)
-                        )
+                        migration_reports.append(analyze_migration_sql(new, source=filename))
         else:
             old_text = (base_sql or Path()).read_text(encoding="utf-8")
             new_text = (head_sql or Path()).read_text(encoding="utf-8")

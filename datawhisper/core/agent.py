@@ -29,19 +29,18 @@ from typing import Protocol as ProtocolTyping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from datawhisper.core.config import DataWhisperConfig, LLMConfig
-from datawhisper.core.decision_engine import DecisionEngine, build_decision_engine
-from datawhisper.core.models import LatencyTelemetry
 from datawhisper.core.database import (
     ExecutionEngine,
     QueryExecutionError,
     QueryTimeoutError,
 )
-from datawhisper.core.models import AgentTelemetry, RedactionReport
+from datawhisper.core.decision_engine import DecisionEngine, build_decision_engine
+from datawhisper.core.models import AgentTelemetry, LatencyTelemetry, RedactionReport
 from datawhisper.core.schema_graph import JoinPlan, PrunedSchema, SchemaGraph
 from datawhisper.core.security import (
     CostViolation,
-    SemanticFirewall,
     SecurityViolation,
+    SemanticFirewall,
     SQLSecurityError,
 )
 
@@ -234,7 +233,7 @@ def _template_sql(question: str) -> str:
 def _summarize_observation(text: str) -> str:
     """Turn a tool observation JSON into a one-line finding for the answer."""
     try:
-        payload = json.loads(text[text.find("{"): text.rfind("}") + 1])
+        payload = json.loads(text[text.find("{") : text.rfind("}") + 1])
     except (ValueError, json.JSONDecodeError):
         return text[:240]
     columns = payload.get("columns") or []
@@ -369,9 +368,7 @@ class DataWhisperAgent:
             self._system_1_ms += verdict.latency_ms
             self._decision_calls += 1
         except SecurityViolation as exc:
-            telemetry.append(
-                AgentTelemetry(stage="firewall", outcome="rejected", detail=str(exc))
-            )
+            telemetry.append(AgentTelemetry(stage="firewall", outcome="rejected", detail=str(exc)))
             return self._fail(
                 question,
                 telemetry,
@@ -481,7 +478,9 @@ class DataWhisperAgent:
                     latency=LatencyTelemetry(
                         system_1_ms=round(self._system_1_ms, 3),
                         system_2_ms=round(self._system_2_ms, 3),
-                        execution_ms=round(sum(step.elapsed_ms for step in steps if step.action == "run_sql"), 3),
+                        execution_ms=round(
+                            sum(step.elapsed_ms for step in steps if step.action == "run_sql"), 3
+                        ),
                         decision_calls=self._decision_calls,
                     ),
                     redactions=total_redactions if total_redactions.total else None,

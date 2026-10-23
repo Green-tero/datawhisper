@@ -38,10 +38,9 @@ import re
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, Sequence, runtime_checkable
-
-from pydantic import BaseModel, Field
+from typing import Any, Protocol, runtime_checkable
 
 from datawhisper.core.config import DecisionConfig
 
@@ -80,10 +79,42 @@ class DecisionEngine(Protocol):
 # ---------------------------------------------------------------------------
 _STOPWORDS = frozenset(
     {
-        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how",
-        "in", "is", "it", "of", "on", "or", "that", "the", "their", "this",
-        "to", "was", "were", "what", "which", "who", "with", "show", "list",
-        "me", "give", "all", "per", "each", "please",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "this",
+        "to",
+        "was",
+        "were",
+        "what",
+        "which",
+        "who",
+        "with",
+        "show",
+        "list",
+        "me",
+        "give",
+        "all",
+        "per",
+        "each",
+        "please",
     }
 )
 
@@ -99,9 +130,7 @@ def _tokens(text: str) -> set[str]:
 def _affinity_hits(query_tokens: set[str]) -> frozenset[str]:
     """Concepts the question implies, per the curated lexicon."""
     return frozenset(
-        concept
-        for concept, words in _AFFINITY_LEXICON.items()
-        if query_tokens & words
+        concept for concept, words in _AFFINITY_LEXICON.items() if query_tokens & words
     )
 
 
@@ -119,34 +148,112 @@ def _now_ms(start: float) -> float:
 #: semantic layer a real System-1 model would provide.
 _AFFINITY_LEXICON: dict[str, frozenset[str]] = {
     "aggregate": frozenset(
-        {"sum", "total", "count", "many", "average", "avg", "mean", "spend", "spends",
-         "revenue", "breakdown", "aggregate", "aggregation", "group", "per", "totals"}
+        {
+            "sum",
+            "total",
+            "count",
+            "many",
+            "average",
+            "avg",
+            "mean",
+            "spend",
+            "spends",
+            "revenue",
+            "breakdown",
+            "aggregate",
+            "aggregation",
+            "group",
+            "per",
+            "totals",
+        }
     ),
     "analytics": frozenset(
-        {"analytics", "statistic", "statistics", "stats", "distribution", "ratio",
-         "percent", "percentage", "share", "share_ratio"}
+        {
+            "analytics",
+            "statistic",
+            "statistics",
+            "stats",
+            "distribution",
+            "ratio",
+            "percent",
+            "percentage",
+            "share",
+            "share_ratio",
+        }
     ),
     "trend": frozenset(
-        {"trend", "trends", "growth", "change", "daily", "weekly", "monthly",
-         "quarterly", "yearly", "history", "series", "over"}
+        {
+            "trend",
+            "trends",
+            "growth",
+            "change",
+            "daily",
+            "weekly",
+            "monthly",
+            "quarterly",
+            "yearly",
+            "history",
+            "series",
+            "over",
+        }
     ),
     "time": frozenset({"time", "times", "timeline", "chronological", "sequence"}),
     "lookup": frozenset(
-        {"lookup", "get", "find", "fetch", "retrieve", "row", "record", "entry",
-         "detail", "details", "specific", "exact", "search"}
+        {
+            "lookup",
+            "get",
+            "find",
+            "fetch",
+            "retrieve",
+            "row",
+            "record",
+            "entry",
+            "detail",
+            "details",
+            "specific",
+            "exact",
+            "search",
+        }
     ),
     "row": frozenset({"row", "rows", "record", "records", "entry", "entries"}),
     "schema": frozenset(
-        {"schema", "table", "tables", "column", "columns", "structure", "catalog",
-         "join", "joins", "relationship", "relationships", "keys"}
+        {
+            "schema",
+            "table",
+            "tables",
+            "column",
+            "columns",
+            "structure",
+            "catalog",
+            "join",
+            "joins",
+            "relationship",
+            "relationships",
+            "keys",
+        }
     ),
     "exploration": frozenset(
         {"explore", "exploration", "discover", "inspect", "overview", "map", "audit"}
     ),
     "quality": frozenset(
-        {"quality", "null", "nulls", "missing", "duplicate", "duplicates", "anomaly",
-         "anomalies", "outlier", "outliers", "skew", "dirty", "clean", "invalid",
-         "malformed", "consistent"}
+        {
+            "quality",
+            "null",
+            "nulls",
+            "missing",
+            "duplicate",
+            "duplicates",
+            "anomaly",
+            "anomalies",
+            "outlier",
+            "outliers",
+            "skew",
+            "dirty",
+            "clean",
+            "invalid",
+            "malformed",
+            "consistent",
+        }
     ),
     "data": frozenset({"data", "dataset", "datasets", "database", "db"}),
 }
@@ -298,9 +405,7 @@ class OnnxDecisionEngine:
                 "onnxruntime is not installed; pip install onnxruntime"
             ) from exc
         try:
-            self._session = ort.InferenceSession(
-                model_path, providers=["CPUExecutionProvider"]
-            )
+            self._session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         except Exception as exc:
             raise DecisionBackendError(f"could not load ONNX model {model_path!r}: {exc}") from exc
         self._max_length = max_length
@@ -356,7 +461,7 @@ class RemoteDecisionEngine:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=self._timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         if "value" not in body:
             raise DecisionBackendError(f"decision endpoint returned no value: {body}")
@@ -381,9 +486,7 @@ class RemoteDecisionEngine:
     def score_risk(self, text: str, criteria: str = "") -> Decision:
         start = time.perf_counter()
         value = float(self._call({"task": "risk", "input": text, "criteria": criteria}))
-        return Decision(
-            min(max(value, 0.0), 1.0), self.name, _now_ms(start)
-        )
+        return Decision(min(max(value, 0.0), 1.0), self.name, _now_ms(start))
 
 
 # ---------------------------------------------------------------------------
