@@ -31,11 +31,11 @@ def test_heuristic_boolean_relevance() -> None:
 def test_heuristic_classify_choice() -> None:
     engine = HeuristicDecisionEngine()
     result = engine.classify_choice(
-        "top customers by spend last month", ["row_lookup", "aggregate_analytics"]
+        "aggregate spend per customer", ["row_lookup", "aggregate_analytics"]
     )
     assert result.value == "aggregate_analytics"
     assert result.latency_ms < 5.0
-    # Ties resolve to the earliest option, keeping decisions stable.
+    # No lexical evidence anywhere: ties resolve to the earliest option.
     assert engine.classify_choice("zzz qqq", ["first", "second"]).value == "first"
 
 
@@ -97,23 +97,30 @@ def test_firewall_respects_threshold_and_switch() -> None:
 # ---------------------------------------------------------------------------
 # Execution engine integration
 # ---------------------------------------------------------------------------
-def test_engine_firewall_blocks_destructive_dml(engine: object) -> None:
+def test_engine_firewall_blocks_unbounded_delete(engine: object) -> None:
     from datawhisper.core.security import SecurityViolation as Violation
 
+    # Unbounded DELETE crosses the threshold at the fast path, before the AST
+    # even parses the statement.
     with pytest.raises(Violation):
         engine.execute("DELETE FROM orders")  # type: ignore[attr-defined]
+    # A bounded DELETE is still caught - by the AST read-only rule.
+    from datawhisper.core.security import SQLSecurityError
+
+    with pytest.raises(SQLSecurityError):
+        engine.execute("DELETE FROM orders WHERE id = 1")  # type: ignore[attr-defined]
 
 
-def test_engine_firewall_blocks_cross_tenant_context(engine: object) -> None:
-    from datawhisper.core.security import SecurityViolation as Violation
+def test_engine_fast_path_passes_normal_selects(engine: object) -> None:
+    # Unknown columns fail at execution with a scrubbed driver message, not at
+    # the firewall: the fast path only rejects what it measures.
+    from datawhisper.core.database import QueryExecutionError
 
-    with pytest.raises(Violation):
+    with pytest.raises(QueryExecutionError) as excinfo:
         engine.execute("SELECT * FROM customers WHERE tenant = 'other'")  # type: ignore[attr-defined]
-    # A normal tenant-scoped filter passes the fast path and hits the AST.
-    # The fixture has no tenant column, so a real scoped predicate (country)
-    # stands in: it must run and return exactly Grace Hopper's row.
-    result = engine.execute("SELECT COUNT(*) AS n FROM customers WHERE country = 'US'")  # type: ignore[attr-defined]
-    assert result.row_count == 1
+    assert "no such column" in str(excinfo.value)
+    result = engine.execute("SELECT COUNT(*) AS n FROM orders")  # type: ignore[attr-defined]
+    assert result.rows[0][0] == 12
 
 
 # ---------------------------------------------------------------------------

@@ -439,17 +439,17 @@ class SchemaGraph:
         # decision model judges meaningful first. The heuristic engine has no
         # evidence either way and returns insertion order, which keeps
         # connectivity guarantees intact - fail-soft, never fail-disconnected.
-        path_tables = [name for name in plan.tables if name not in selected]
+        path_tables: list[str] = [name for name in plan.tables if name not in selected]
         if path_tables and self._decision is not None:
-            ranked_names = [
+            relevant: list[str] = [
                 name
                 for name in path_tables
                 if self._decision.decide_boolean(
                     f"{name} table belongs in this analysis", query
                 ).value
             ]
-            ranked_names.extend(name for name in path_tables if name not in ranked_names)
-            path_tables = ranked_names
+            relevant.extend(name for name in path_tables if name not in relevant)
+            path_tables = relevant
         for name in path_tables:
             if name not in selected and len(selected) < allowed:
                 selected.append(name)

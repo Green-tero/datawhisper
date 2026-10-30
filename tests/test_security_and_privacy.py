@@ -344,11 +344,11 @@ def test_engine_does_not_touch_safe_columns(engine: object) -> None:
 
 
 def test_engine_blocks_mutation(engine: object) -> None:
-    # Destructive DDL/DML is stopped by the System-1 firewall before the AST
-    # even parses; both layers raise, so accept either as the enforcement.
-    from datawhisper.core.security import SecurityViolation as FirewallViolation
+    # The semantic firewall rejects the destructive statement in microseconds,
+    # before the AST pass; the table is untouched either way.
+    from datawhisper.core.security import SecurityViolation
 
-    with pytest.raises((SQLSecurityError, FirewallViolation)):
+    with pytest.raises(SecurityViolation):
         engine.execute("DROP TABLE orders")  # type: ignore[attr-defined]
     assert any(t.name == "orders" for t in engine.introspect().tables)  # type: ignore[attr-defined]
 

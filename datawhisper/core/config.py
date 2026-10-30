@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ProviderName = Literal["gemini", "openai", "local", "none"]
+ProviderName = Literal["gemini", "openai", "none"]
 DecisionProvider = Literal["auto", "heuristic", "onnx", "http"]
 RedactionMode = Literal["hash", "mask", "tokenize", "redact"]
 PlanFailurePolicy = Literal["allow_with_budget", "reject"]

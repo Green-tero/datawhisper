@@ -19,7 +19,6 @@ rather than burning tokens indefinitely.
 from __future__ import annotations
 
 import json
-import re
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from time import perf_counter
@@ -213,92 +212,14 @@ class ScriptedProvider:
         return self._responses.popleft()
 
 
-def _template_sql(question: str) -> str:
-    """Deterministic offline SQL synthesis from a question (no model call).
-
-    Aggregate wording maps to a grouped SELECT over the shared sample schema;
-    everything else degrades to a bounded table scan. Every output passes
-    through the firewall and cost gate at execution time, so a mis-guess
-    becomes a safe diagnostic instead of a wrong answer.
-    """
-    lowered = question.lower()
-    counts = re.findall(r"\b(count|total|number|how many|sizes|volume)\b", lowered)
-    if counts:
-        return "SELECT status, COUNT(*) AS n FROM orders GROUP BY status ORDER BY n DESC"
-    if re.search(r"\b(top|largest|biggest|most)\b", lowered):
-        return "SELECT * FROM orders ORDER BY total DESC LIMIT 10"
-    return "SELECT * FROM orders LIMIT 10"
-
-
-def _summarize_observation(text: str) -> str:
-    """Turn a tool observation JSON into a one-line finding for the answer."""
-    try:
-        payload = json.loads(text[text.find("{") : text.rfind("}") + 1])
-    except (ValueError, json.JSONDecodeError):
-        return text[:240]
-    columns = payload.get("columns") or []
-    rows = payload.get("rows") or []
-    if len(columns) >= 2 and columns[0] in {"status", "state", "day"} and rows:
-        counts = {str(row[0]): row[1] for row in rows if len(row) >= 2}
-        grouped = ", ".join(f"{key}={value}" for key, value in counts.items())
-        return f"{len(rows)} groups: {grouped}."
-    return f"Query returned {payload.get('row_count', len(rows))} row(s)."
-
-
-class TemplateProvider:
-    """Local, zero-cost System-2: deterministic SQL template synthesis.
-
-    Chooses a template from the intent classifier's lexical evidence, runs one
-    read-only statement through the sandbox, then answers from the measured
-    observation. No API call, no model download and no network access; every
-    emitted statement still passes the firewall and cost gate before it
-    executes, so a mis-guess degrades to a safe diagnostic.
-    """
-
-    def __init__(self, config: LLMConfig) -> None:
-        self._template = (config.model or "").strip() or "orders_status_count"
-
-    def complete(self, messages: Sequence[Message]) -> str:
-        user_text = next(
-            (m["content"] for m in reversed(list(messages)) if m["role"] == "user"),
-            "",
-        )
-        assistant_turns = sum(1 for m in messages if m["role"] == "assistant")
-        # First turn synthesises one read-only statement; every later turn
-        # finalises from the latest observation, whatever it is (measured
-        # rows, or a SECURITY/COST/SQL diagnostic) so the loop never spins.
-        if assistant_turns >= 1:
-            return json.dumps(
-                {
-                    "thought": "observation received; closing with measured values",
-                    "action": "final_answer",
-                    "action_input": {
-                        "answer": _summarize_observation(user_text),
-                        "sql": None,
-                    },
-                }
-            )
-        sql = _template_sql(user_text)
-        return json.dumps(
-            {
-                "thought": "offline template synthesis (System-2 local)",
-                "action": "run_sql",
-                "action_input": {"sql": sql},
-            }
-        )
-
-
 def build_provider(config: LLMConfig) -> LLMProvider:
     if config.provider == "gemini":
         return GeminiProvider(config)
     if config.provider == "openai":
         return OpenAIProvider(config)
-    if config.provider == "local":
-        return TemplateProvider(config)
     raise ProviderError(
         "No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_KEY "
-        "(or DW_LLM_PROVIDER=local for offline template synthesis) to enable "
-        "the agentic layer."
+        "(or DW_LLM_PROVIDER) to enable the agentic layer."
     )
 
 
@@ -725,8 +646,7 @@ class DataWhisperAgent:
             "- Results are PII-scrubbed before you see them. Never attempt to recover "
             "redacted values or infer them; treat them as unavailable.\n"
             "- Every number in the final answer must come from a tool observation.\n\n"
-            "Detected intent (System-1 classifier): "
-            f"{intent or 'unclassified'}.\n\n"
+            "Detected intent (System-1 classifier): " + (intent or "unclassified") + "\n\n"
             f"Only this pruned sub-schema is in scope (selected for this question):\n"
             f"{schema_context}\n\n"
             f"Tools (JSON action_input):\n{rendered_tools}\n\n"

@@ -19,11 +19,13 @@ plus lexical rules, which keeps them deterministic, air-gapped and usable in
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 
 import sqlglot
 from pydantic import BaseModel, Field
 from sqlglot import exp
+
+from datawhisper.integrations.github_bot import markdown_table
 
 
 class MigrationFinding(BaseModel):
@@ -212,9 +214,10 @@ def _scan_alter_table(
     # Lock risk on any ADD COLUMN with a default or type rewrite: SQLite and
     # Postgres both rewrite tables for some type changes.
     for action in statement.args.get("actions") or []:
-        if isinstance(action, exp.ColumnDef):
-            kind = action.args.get("kind")
-            if kind is not None and kind.sql().upper().startswith(("SET DATA TYPE", "TYPE")):
+        kind_node = action.args.get("kind") if isinstance(action, exp.ColumnDef) else None
+        if kind_node is not None:
+            kind = str(kind_node.sql()).upper()
+            if kind.startswith(("SET DATA TYPE", "TYPE")):
                 report.findings.append(
                     MigrationFinding(
                         kind="lock_risk",
@@ -259,17 +262,6 @@ def _scan_create_table(
             )
 
 
-def _markdown_table(headers: Sequence[str], rows: Sequence[Iterable[str]]) -> str:
-    """Render a markdown table with pipe-escaped cells (no github_bot import)."""
-    lines = ["| " + " | ".join(str(h).replace("|", "\\|") for h in headers) + " |"]
-    lines.append("|" + "|".join("---" for _ in headers) + "|")
-    lines.extend(
-        "| " + " | ".join(str(c).replace("|", "\\|").replace("\n", " ") for c in row) + " |"
-        for row in rows
-    )
-    return "\n".join(lines)
-
-
 def render_migration_report(reports: Sequence[MigrationReport]) -> str:
     """Render all findings for one PR as a markdown section."""
     merged = MigrationReport()
@@ -280,7 +272,7 @@ def render_migration_report(reports: Sequence[MigrationReport]) -> str:
     lines = ["### 🧾 Static migration audit", ""]
     if merged.destructive:
         lines.append(
-            _markdown_table(
+            markdown_table(
                 ["Severity", "Signal", "Detail"],
                 [
                     ["🔴 error", finding.kind.replace("_", " "), finding.message]
@@ -291,7 +283,7 @@ def render_migration_report(reports: Sequence[MigrationReport]) -> str:
         lines.append("")
     if merged.locks:
         lines.append(
-            _markdown_table(
+            markdown_table(
                 ["Severity", "Signal", "Detail"],
                 [["🟡 warning", "lock risk", finding.message] for finding in merged.locks],
             )
@@ -299,7 +291,7 @@ def render_migration_report(reports: Sequence[MigrationReport]) -> str:
         lines.append("")
     if merged.missing_fk_indexes:
         lines.append(
-            _markdown_table(
+            markdown_table(
                 ["Severity", "Signal", "Detail"],
                 [
                     ["🟠 warning", "missing FK index", finding.message]

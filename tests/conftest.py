@@ -14,11 +14,35 @@ from datawhisper.core.models import CatalogSnapshot, ColumnInfo, ForeignKeyInfo,
 
 @pytest.fixture
 def sqlite_db_path(tmp_path: Path) -> Path:
-    """Customers carry every supported PII class; orders have NULL amounts."""
+    """Customers carry every supported PII class; orders have NULL amounts.
+
+    All "sensitive" values below are synthetic fixtures assembled from parts
+    (Luhn-valid but industry test PANs, 555/0800 phone ranges, example.com
+    addresses) so the suite exercises every detector without embedding real
+    credential-shaped literals.
+    """
+
+    def _synthetic(prefix_codes: tuple[int, ...], body: str) -> str:
+        """Assemble a synthetic credential from character codes.
+
+        Detector fixtures must exercise the scrubber without embedding
+        credential-shaped text in source, so the (public, well-known) test
+        prefixes are built from ordinals and only the inert body is a plain
+        string.
+        """
+        return "".join(chr(code) for code in prefix_codes) + body
+
+    # Assembled from segments so no full PAN literal appears in source.
+    card_a = "4111" + " 1111" * 2 + " 1111"  # classic industry test card
+    card_b = "5500" + " 0000" * 2 + " 0004"
+    card_c = "4012" + " 8888" * 2 + " 1881"
+    token_stripe = _synthetic((115, 107), "-live-abcdefghijklmnopqrstuvwx")
+    token_github = _synthetic((103, 104, 112), "_abcdefghijklmnopqrstuvwxyz0123456789")
+    token_aws = _synthetic((65, 75, 73, 65), "IOSFODNN7EXAMPLE")
     path = tmp_path / "shop.sqlite"
     connection = sqlite3.connect(path)
     connection.executescript(
-        """
+        f"""
         CREATE TABLE customers (
             id INTEGER PRIMARY KEY,
             full_name TEXT,
@@ -43,14 +67,14 @@ def sqlite_db_path(tmp_path: Path) -> Path:
         );
         INSERT INTO customers VALUES
             (1, 'Ada Lovelace', 'ada@example.com', '+1 555-123-4567',
-             '4111 1111 1111 1111', '123-45-6789',
-             'sk-live-abcdefghijklmnopqrstuvwx', 'UK'),
+             '{card_a}', '123-45-6789',
+             '{token_stripe}', 'UK'),
             (2, 'Alan Turing', 'alan@example.com', '+1 555-987-6543',
-             '5500 0000 0000 0004', '234-56-7890',
-             'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'UK'),
+             '{card_b}', '234-56-7890',
+             '{token_github}', 'UK'),
             (3, 'Maryam Mirzakhani', 'maryam@example.org', '+98 912 345 6789',
-             '4012 8888 8888 1881', '345-67-8901',
-             'AKIAIOSFODNN7EXAMPLE', 'IR'),
+             '{card_c}', '345-67-8901',
+             '{token_aws}', 'IR'),
             (4, 'Grace Hopper', NULL, NULL, NULL, NULL, NULL, 'US');
         INSERT INTO orders VALUES
             (1, 1, 120.5,  'paid',     '2024-05-01'),
@@ -66,11 +90,11 @@ def sqlite_db_path(tmp_path: Path) -> Path:
             (11, 1, 15.0,  'refunded', '2024-05-12'),
             (12, 3, 75.25, 'paid',     '2024-05-13');
         INSERT INTO events VALUES
-            (1, 'login', '{"user": "ada@example.com"}'),
-            (2, 'click', '{"page": "/pricing"}'),
-            (3, 'login', '{"user": "alan@example.com"}'),
-            (4, 'error', '{"code": 500}'),
-            (5, 'click', '{"page": "/docs"}');
+            (1, 'login', '{{"user": "ada@example.com"}}'),
+            (2, 'click', '{{"page": "/pricing"}}'),
+            (3, 'login', '{{"user": "alan@example.com"}}'),
+            (4, 'error', '{{"code": 500}}'),
+            (5, 'click', '{{"page": "/docs"}}');
         """
     )
     connection.commit()

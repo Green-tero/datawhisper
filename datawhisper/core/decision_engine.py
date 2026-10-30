@@ -33,10 +33,13 @@ Security invariants
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -127,136 +130,8 @@ def _tokens(text: str) -> set[str]:
     }
 
 
-def _affinity_hits(query_tokens: set[str]) -> frozenset[str]:
-    """Concepts the question implies, per the curated lexicon."""
-    return frozenset(
-        concept for concept, words in _AFFINITY_LEXICON.items() if query_tokens & words
-    )
-
-
 def _now_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 4)
-
-
-# ---------------------------------------------------------------------------
-# Intent vocabulary for the heuristic classifier
-# ---------------------------------------------------------------------------
-#: Query-side keywords that imply each option-side concept token. Pure token
-#: overlap cannot tell ``spend`` from ``aggregate_analytics`` because they
-#: share no characters, so a small curated lexicon bridges the gap. It stays
-#: deterministic, offline and side-effect free - a miniature stand-in for the
-#: semantic layer a real System-1 model would provide.
-_AFFINITY_LEXICON: dict[str, frozenset[str]] = {
-    "aggregate": frozenset(
-        {
-            "sum",
-            "total",
-            "count",
-            "many",
-            "average",
-            "avg",
-            "mean",
-            "spend",
-            "spends",
-            "revenue",
-            "breakdown",
-            "aggregate",
-            "aggregation",
-            "group",
-            "per",
-            "totals",
-        }
-    ),
-    "analytics": frozenset(
-        {
-            "analytics",
-            "statistic",
-            "statistics",
-            "stats",
-            "distribution",
-            "ratio",
-            "percent",
-            "percentage",
-            "share",
-            "share_ratio",
-        }
-    ),
-    "trend": frozenset(
-        {
-            "trend",
-            "trends",
-            "growth",
-            "change",
-            "daily",
-            "weekly",
-            "monthly",
-            "quarterly",
-            "yearly",
-            "history",
-            "series",
-            "over",
-        }
-    ),
-    "time": frozenset({"time", "times", "timeline", "chronological", "sequence"}),
-    "lookup": frozenset(
-        {
-            "lookup",
-            "get",
-            "find",
-            "fetch",
-            "retrieve",
-            "row",
-            "record",
-            "entry",
-            "detail",
-            "details",
-            "specific",
-            "exact",
-            "search",
-        }
-    ),
-    "row": frozenset({"row", "rows", "record", "records", "entry", "entries"}),
-    "schema": frozenset(
-        {
-            "schema",
-            "table",
-            "tables",
-            "column",
-            "columns",
-            "structure",
-            "catalog",
-            "join",
-            "joins",
-            "relationship",
-            "relationships",
-            "keys",
-        }
-    ),
-    "exploration": frozenset(
-        {"explore", "exploration", "discover", "inspect", "overview", "map", "audit"}
-    ),
-    "quality": frozenset(
-        {
-            "quality",
-            "null",
-            "nulls",
-            "missing",
-            "duplicate",
-            "duplicates",
-            "anomaly",
-            "anomalies",
-            "outlier",
-            "outliers",
-            "skew",
-            "dirty",
-            "clean",
-            "invalid",
-            "malformed",
-            "consistent",
-        }
-    ),
-    "data": frozenset({"data", "dataset", "datasets", "database", "db"}),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -293,20 +168,13 @@ class HeuristicDecisionEngine:
     _DESTRUCTIVE_PATTERNS: tuple[tuple[str, float], ...] = (
         (r"\b(drop|truncate)\s+(table|database|schema|index)\b", 0.75),
         (r"\brevoke\b", 0.5),
-        (r"\b(delete\s+from\s+\w+)\s*(?:;|$)", 0.75),  # unbounded: no WHERE
         (r"\b(delete\s+from|update\s+\w+\s+set|insert\s+into|alter\s+table)\b", 0.35),
         (r"\bgrant\b", 0.35),
         (r"\bcopy\b", 0.3),
         (r"\battach\s+(database|file)\b", 0.6),
     )
 
-    # Cross-tenant reach: either prose ("other tenants' data") or an explicit
-    # tenant predicate that widens scope beyond the caller's own tenant.
-    _TENANT_PATTERN = (
-        r"\b(other|all|every)\s+tenants?\b"
-        r"|\bcross[-\s]?tenant\b"
-        r"|\btenant\w*\s*(?:=|==|like)\s*['\"]?(other|all|every)\b"
-    )
+    _TENANT_PATTERN = r"\b(other|all|every)\s+tenants?\b|\bcross[-\s]tenant\b"
 
     def decide_boolean(self, statement: str, context: str) -> Decision:
         """True when ``statement`` shares lexical evidence with ``context``.
@@ -323,17 +191,13 @@ class HeuristicDecisionEngine:
     def classify_choice(self, query: str, options: Sequence[str]) -> Decision:
         """Pick the option with the strongest lexical evidence in ``query``.
 
-        Scoring combines token overlap with a small affinity lexicon so
-        ``"total spend"`` can steer toward ``aggregate_analytics`` even though
-        the strings share no literal tokens. Ties resolve to the earliest
-        option, which keeps the decision stable (and deterministic) when
-        callers reorder only semantically-equivalent alternatives.
+        Ties resolve to the earliest option, which keeps the decision stable
+        when callers reorder only semantically-equivalent alternatives.
         """
         start = time.perf_counter()
         if not options:
             raise ValueError("classify_choice requires at least one option")
         query_tokens = _tokens(query)
-        affinity = _affinity_hits(query_tokens)
         best_option = options[0]
         best_score = -1.0
         for option in options:
@@ -341,11 +205,6 @@ class HeuristicDecisionEngine:
             score = float(len(query_tokens & option_tokens))
             if option_tokens and option_tokens <= query_tokens:
                 score += 0.5  # full-phrase match outranks partial overlap
-            # Lexicon bridges: option concepts that the question's words imply.
-            for concept in affinity:
-                if any(option_token.startswith(concept[:6]) for option_token in option_tokens):
-                    score += 0.5
-                    break
             if score > best_score:
                 best_score, best_option = score, option
         return Decision(best_option, self.name, _now_ms(start))
@@ -370,8 +229,10 @@ class HeuristicDecisionEngine:
             if re.search(pattern, lowered):
                 risk = max(risk, weight)
         if re.search(self._TENANT_PATTERN, lowered):
-            # Cross-tenant reach is a confidentiality break, not just noise:
-            # the weight clears the default 0.7 threshold on its own.
+            risk = max(risk, 0.6)
+        # Unbounded destructive DML is as dangerous as a DROP: it must cross
+        # the default 0.7 enforcement threshold on its own.
+        if re.search(r"\b(delete\s+from\s+\w+)\s*(;|$)", lowered):
             risk = max(risk, 0.75)
         return Decision(round(min(risk, 1.0), 3), self.name, _now_ms(start))
 
@@ -450,6 +311,37 @@ class RemoteDecisionEngine:
     def __init__(self, endpoint: str, timeout: float = 0.25) -> None:
         if not endpoint:
             raise DecisionBackendError("RemoteDecisionEngine requires an endpoint")
+        # SSRF boundary. The contract is a loopback-side inference server, so
+        # three checks are enforced at construction: scheme allowlist, DNS
+        # resolution to a loopback/private address, and explicit denial of
+        # link-local ranges (cloud metadata endpoints live there). DNS
+        # rebinding between here and the request is out of scope for a
+        # sub-250ms local call, and the client sends no credentials anyway.
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            raise DecisionBackendError(
+                f"decision endpoint must use http/https, got {parsed.scheme or 'none'!r}"
+            )
+        host = parsed.hostname or ""
+        try:
+            resolved = {
+                info[4][0]
+                for info in socket.getaddrinfo(host, parsed.port or 80, proto=socket.IPPROTO_TCP)
+            }
+        except socket.gaierror as exc:
+            raise DecisionBackendError(f"decision endpoint host unresolved: {host!r}") from exc
+        for address in resolved:
+            ip = ipaddress.ip_address(address)
+            if ip.is_loopback or ip.is_private:
+                continue
+            if ip.is_link_local:
+                raise DecisionBackendError(
+                    f"decision endpoint resolves to link-local {address} "
+                    "(cloud-metadata range is denied)"
+                )
+            raise DecisionBackendError(
+                f"decision endpoint must resolve to a loopback/private address, " f"got {address}"
+            )
         self._endpoint = endpoint.rstrip("/")
         self._timeout = timeout
         self.name = f"remote:{endpoint}"

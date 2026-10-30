@@ -231,55 +231,43 @@ class SemanticFirewall:
     def threshold(self) -> float:
         return self.config.risk_threshold
 
-    def _blocked(self, decision: Decision) -> bool:
+    def _blocked(self, decision: Decision, reasons: list[str]) -> bool:
         return self.config.firewall_enabled and decision.value > self.threshold
 
     def check_context(self, text: str) -> Decision:
         """Score a natural-language input for injection risk. Raises on breach."""
         result = self._decision.score_risk(text, criteria="prompt_injection")
-        if self._blocked(result):
+        if self._blocked(result, []):
             raise SecurityViolation(result.value, self.reasons_for(text), self.threshold)
         return result
 
     def check_statement(self, sql: str) -> Decision:
         """Score one SQL statement for destructive intent. Raises on breach."""
         result = self._decision.score_risk(sql, criteria="statement_mutation")
-        if self._blocked(result):
+        if self._blocked(result, []):
             raise SecurityViolation(result.value, self.reasons_for(sql), self.threshold)
         return result
 
     def reasons_for(self, text: str) -> list[str]:
-        """Human-readable explanations for a rejection, derived from the rules.
-
-        The explanation patterns deliberately mirror the decision engine's
-        scoring rules so a rejection never cites a signal the score did not
-        measure. Unknown high-risk input (a model-scored pattern with no
-        lexical counterpart) falls through to the generic message carried by
-        :class:`SecurityViolation` itself.
-        """
+        """Human-readable explanations for a rejection, derived from the rules."""
         lowered = text.lower()
         reasons: list[str] = []
-        if re.search(
-            r"\bignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?)\b"
-            r"|\bdisregard\s+(all\s+)?(previous|prior|your)\b"
-            r"|\breveal\s+(your\s+)?(system\s+)?prompt\b"
-            r"|\bprint\s+(your\s+)?(system\s+)?prompt\b"
-            r"|\bjailbreak\b|\bdeveloper\s+mode\b"
-            r"|\bact\s+as\s+.{0,40}without\s+(any\s+)?restrictions\b"
-            r"|\bexfiltrate\b",
-            lowered,
-        ):
+        injection = (
+            r"\bignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?)\b|"
+            r"\bdisregard\s+(all\s+)?(previous|prior|your)\b|"
+            r"\breveal\s+(your\s+)?(system\s+)?prompt\b|"
+            r"\bprint\s+(your\s+)?(system\s+)?prompt\b|"
+            r"\bjailbreak\b|\bdeveloper\s+mode\b|"
+            r"\bact\s+as\s+.{0,40}\bwithout\s+(any\s+)?restrictions\b|"
+            r"\bexfiltrate\b"
+        )
+        if re.search(injection, lowered):
             reasons.append("input matches a prompt-injection signature")
         if re.search(r"\b(drop|truncate)\s+(table|database|schema|index)\b", lowered):
             reasons.append("destructive DDL detected (DROP/TRUNCATE)")
         if re.search(r"\bdelete\s+from\s+\w+\s*(;|$)", lowered):
             reasons.append("unbounded DELETE detected")
-        if re.search(
-            r"\b(other|all|every)\s+tenants?\b"
-            r"|\bcross[-\s]tenant\b"
-            r"|\btenant\w*\s*(?:=|==|like)\s*['\"]?(other|all|every)\b",
-            lowered,
-        ):
+        if re.search(r"\b(other|all|every)\s+tenants?\b|\bcross[-\s]tenant\b", lowered):
             reasons.append("cross-tenant access pattern detected")
         return reasons
 

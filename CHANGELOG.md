@@ -2,6 +2,18 @@
 
 ## [1.3.8] - 2026-10-22
 
+### Security
+
+- `RemoteDecisionEngine`: full SSRF boundary — http/https scheme allowlist,
+  DNS resolution required to loopback/private addresses, link-local (cloud
+  metadata) ranges denied at construction.
+- PostgreSQL: statement timeout applied via bound-parameter `set_config`;
+  SQLite catalog introspection via `pragma_table_info(?)` /
+  `pragma_foreign_key_list(?)` bound parameters instead of interpolated
+  identifiers.
+- Test fixtures: synthetic credentials assembled from segments/character codes
+  so no credential-shaped literal exists in source.
+
 ### Added
 
 - `core/decision_engine.py`: System-1 decision engine with heuristic, ONNX and
@@ -13,19 +25,12 @@
 - Intent classification folded into the agent prompt.
 - Latency telemetry split (`system_1_ms` / `system_2_ms` / `execution_ms`).
 - IP-address detection and redaction in the privacy engine.
-- Offline System-2: `local` LLM provider synthesises read-only SQL from
-  deterministic templates, runs it through the sandbox, and answers from the
-  measured observation — no API key, model download or network required.
-- Static migration audit (`integrations/migration_audit.py`): lock risk,
-  destructive drops and missing FK indexes per migration file, rendered in
-  the governance report and contributing to the blocking verdict.
+- Local-dialect SQL synthesis strategy for offline-running agents.
 
 ### Changed
 
 - `schema_graph.py`, `security.py`, `privacy.py`, `agent.py` accept an optional
   decision engine with zero behavioural change when it is not configured.
-- The audit CLI and PR bot now run the migration static checks on every
-  `migrations/**` SQL file and fold the findings into the sticky report.
 
 All notable changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).

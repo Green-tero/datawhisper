@@ -276,8 +276,11 @@ class SQLiteBackend:
         ).fetchall()
         for name, kind in relations:
             table_name = str(name)
-            quoted = _quote_identifier(table_name)
-            column_rows = self._conn.execute(f"PRAGMA table_info({quoted})").fetchall()
+            # pragma_* table-valued functions accept bound parameters, which
+            # keeps catalog introspection free of interpolated identifiers.
+            column_rows = self._conn.execute(
+                "SELECT * FROM pragma_table_info(?)", (table_name,)
+            ).fetchall()
             columns = [
                 ColumnInfo(
                     name=str(row[1]),
@@ -288,7 +291,9 @@ class SQLiteBackend:
                 for row in column_rows
             ]
             foreign_keys: list[ForeignKeyInfo] = []
-            fk_rows = self._conn.execute(f"PRAGMA foreign_key_list({quoted})").fetchall()
+            fk_rows = self._conn.execute(
+                "SELECT * FROM pragma_foreign_key_list(?)", (table_name,)
+            ).fetchall()
             grouped: dict[int, ForeignKeyInfo] = {}
             for fk in fk_rows:
                 fk_id = int(fk[0])
@@ -307,9 +312,10 @@ class SQLiteBackend:
             row_count: int | None = None
             if not system:
                 with contextlib.suppress(sqlite3.Error):
-                    row_count = int(
-                        self._conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
-                    )
+                    count_rows = self._conn.execute(
+                        f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+                    ).fetchall()
+                    row_count = int(count_rows[0][0])
             snapshot.tables.append(
                 TableInfo(
                     name=table_name,
@@ -607,7 +613,12 @@ class PostgresBackend:
         except Exception as exc:
             raise BackendUnavailableError(f"could not connect to PostgreSQL: {exc}") from exc
         self._conn.execute("SET default_transaction_read_only = on")
-        self._conn.execute(f"SET statement_timeout = {int(timeout_seconds * 1000)}")
+        # set_config accepts a bound parameter; SET does not, so this avoids
+        # interpolating the timeout value into SQL text.
+        self._conn.execute(
+            "SELECT set_config('statement_timeout', %s, false)",
+            (str(int(timeout_seconds * 1000)),),
+        )
 
     @property
     def dialect(self) -> str:

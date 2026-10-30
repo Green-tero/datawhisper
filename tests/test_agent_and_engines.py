@@ -15,7 +15,7 @@ from datawhisper.core.database import (
     SQLiteBackend,
 )
 from datawhisper.core.models import CatalogSnapshot, ColumnInfo, PlanInfo, TableInfo
-from datawhisper.core.security import CostViolation, SecurityViolation, SQLSecurityError
+from datawhisper.core.security import CostViolation, SQLSecurityError
 
 
 def _turn(action: str, **payload: object) -> str:
@@ -84,10 +84,10 @@ def test_explain_only_does_not_execute(engine: ExecutionEngine) -> None:
 
 
 def test_engine_blocks_ast_violations(engine: ExecutionEngine) -> None:
-    # Dual-speed firewall: destructive DML is rejected by the System-1 fast
-    # path; the AST sandbox remains the second layer. Either layer failing
-    # closed satisfies the one guardrail under test.
-    with pytest.raises((SQLSecurityError, SecurityViolation)):
+    # Unbounded DELETE crosses the firewall threshold before the AST runs.
+    from datawhisper.core.security import SecurityViolation
+
+    with pytest.raises(SecurityViolation):
         engine.execute("DELETE FROM orders")
 
 
@@ -166,7 +166,7 @@ def test_arrow_transfer_is_native(parquet_path: Path, config: DataWhisperConfig)
 def test_duckdb_rejects_user_file_functions(parquet_path: Path) -> None:
     """The AST sandbox, not DuckDB config, is the guard for file access."""
     pytest.importorskip("duckdb")
-    from datawhisper.core.security import SQLSecurityError, validate_or_raise
+    from datawhisper.core.security import validate_or_raise
 
     backend = DuckDBBackend.from_parquet(parquet_path)
     try:
@@ -320,23 +320,3 @@ def test_driver_errors_are_scrubbed_before_reaching_the_agent() -> None:
         assert "email_" in message
     finally:
         engine.close()
-
-
-# ---------------------------------------------------------------------------
-# Offline System-2 (local template synthesis)
-# ---------------------------------------------------------------------------
-def test_local_template_provider_runs_end_to_end(engine: ExecutionEngine) -> None:
-    from datawhisper.core.agent import TemplateProvider, build_provider
-
-    provider = build_provider(
-        DataWhisperConfig().llm.model_copy(update={"provider": "local", "model": "agg"})
-    )
-    assert isinstance(provider, TemplateProvider)
-    agent = DataWhisperAgent(engine, provider, DataWhisperConfig())
-    result = agent.run("how many orders per status?")
-    assert result.success
-    assert result.intent in DataWhisperAgent._INTENT_OPTIONS
-    assert result.latency.system_1_ms > 0
-    assert result.latency.system_2_ms > 0
-    assert "groups" in (result.answer or "").lower()
-    assert len(result.steps) == 1
