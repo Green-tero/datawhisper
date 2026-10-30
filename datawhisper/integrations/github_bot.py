@@ -28,6 +28,7 @@ from datawhisper.core.privacy import PiiCategory, PrivacyScrubber, column_catego
 from datawhisper.integrations.migration_audit import (
     MigrationFinding,
     MigrationReport,
+    markdown_table,
     render_migration_report,
 )
 
@@ -366,16 +367,6 @@ def run_benchmarks(
 # ---------------------------------------------------------------------------
 # Markdown rendering
 # ---------------------------------------------------------------------------
-def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
-    def cell(value: str) -> str:
-        return str(value).replace("|", "\\|").replace("\n", " ")
-
-    lines = ["| " + " | ".join(cell(h) for h in headers) + " |"]
-    lines.append("|" + "|".join("---" for _ in headers) + "|")
-    lines.extend("| " + " | ".join(cell(c) for c in row) + " |" for row in rows)
-    return "\n".join(lines)
-
-
 def unicode_bar(value: float, maximum: float, width: int = 10) -> str:
     if maximum <= 0:
         return "░" * width

@@ -25,7 +25,21 @@ import sqlglot
 from pydantic import BaseModel, Field
 from sqlglot import exp
 
-from datawhisper.integrations.github_bot import markdown_table
+
+def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Render a GitHub-flavored markdown table, escaping pipes in cells.
+
+    Lives here rather than in ``github_bot`` because the bot consumes this
+    module's renderers; importing back from the bot would be circular.
+    """
+
+    def cell(value: str) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = ["| " + " | ".join(cell(h) for h in headers) + " |"]
+    lines.append("|" + "|".join("---" for _ in headers) + "|")
+    lines.extend("| " + " | ".join(cell(c) for c in row) + " |" for row in rows)
+    return "\n".join(lines)
 
 
 class MigrationFinding(BaseModel):
