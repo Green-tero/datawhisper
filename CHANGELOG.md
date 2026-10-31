@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.9] - 2026-10-31
+
+### Changed
+
+- CI matrix now exercises Python 3.12, 3.14 and 3.15 (the newest runtime is
+  non-blocking while runner support settles); the pytest suite fails on
+  `DeprecationWarning`/`PendingDeprecationWarning` so runtime drift surfaces
+  before releases.
+- Minor internal housekeeping: env parsing consolidated to validated lookups,
+  firewall scoring unified behind a single enforce path, stale no-op
+  accumulation removed.
+
 ## [1.3.8] - 2026-10-22
 
 ### Security

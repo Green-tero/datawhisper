@@ -22,8 +22,7 @@ import json
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from time import perf_counter
-from typing import Any, runtime_checkable
-from typing import Protocol as ProtocolTyping
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -45,6 +44,9 @@ from datawhisper.core.security import (
 
 _MAX_OBSERVATION_CHARS = 3500
 _MAX_ROWS_IN_OBSERVATION = 15
+
+#: Observation prefixes that count against the self-healing repair budget.
+_REPAIRABLE_MARKERS = ("[SECURITY ERROR]", "[COST ERROR]", "[SQL ERROR]", "[TIMEOUT]")
 
 #: Tools return either a plain observation or (observation, redaction report).
 ToolResult = str | tuple[str, RedactionReport]
@@ -131,7 +133,7 @@ Message = Mapping[str, str]
 
 
 @runtime_checkable
-class LLMProvider(ProtocolTyping):
+class LLMProvider(Protocol):
     def complete(self, messages: Sequence[Message]) -> str: ...
 
 
@@ -301,7 +303,6 @@ class DataWhisperAgent:
         # Stage 1b: intent classification biases the prompt without burning
         # System-2 tokens on discovery.
         intent = str(self._decision.classify_choice(question, self._INTENT_OPTIONS).value)
-        self._system_1_ms += 0.0  # folded into the decision latency below
         self._decision_calls += 1
 
         try:
@@ -423,12 +424,7 @@ class DataWhisperAgent:
                 )
             )
 
-            if (
-                observation.startswith("[SECURITY ERROR]")
-                or observation.startswith("[COST ERROR]")
-                or observation.startswith("[SQL ERROR]")
-                or observation.startswith("[TIMEOUT]")
-            ):
+            if observation.startswith(_REPAIRABLE_MARKERS):
                 repair_failures += 1
 
             if repair_failures > self._safety.max_sql_repair_attempts:

@@ -1,34 +1,20 @@
 """System-1 decision engine: sub-50ms local judgments for the agentic pipeline.
 
-Architecture
-------------
 The copilot separates *judgment* (System-1: cheap, frequent, bounded decisions
 such as domain selection, intent classification and risk scoring) from
 *synthesis* (System-2: SQL generation by a code LLM). System-1 must never cost
-a network round-trip, so three interchangeable backends implement one
-protocol:
+a network round-trip, so three interchangeable backends implement one protocol:
 
-=================  ===========================================================
-Backend            When it runs
-=================  ===========================================================
-``Heuristic``      Always available: deterministic lexical/regex scoring.
-                   Runs in well under a millisecond and is fully reproducible,
-                   which makes it the engine of record for tests and CI.
-``Onnx``           Loads a local ONNX text-classification model when weights
-                   are configured (``DW_DECISION_MODEL_PATH``). Imported and
-                   loaded lazily; any failure degrades to the heuristic.
-``Remote``         Talks to a local inference server (``DW_LAYA_ENDPOINT``,
-                   a ``laya-serve``-style HTTP contract) for heavier models.
-                   opt-in only; never contacted unless explicitly configured.
-=================  ===========================================================
+* ``Heuristic`` — always available, deterministic lexical/regex scoring; the
+  engine of record for tests and CI.
+* ``Onnx`` — a local ONNX text-classification model when weights are
+  configured (``DW_DECISION_MODEL_PATH``); lazily imported, fail-soft.
+* ``Remote`` — a local ``laya-serve``-style HTTP server
+  (``DW_LAYA_ENDPOINT``); opt-in only, loopback/private addresses enforced.
 
-Security invariants
--------------------
-* The engine never sees row data - only schema identifiers, questions and
-  statements the caller already chose to expose.
-* Every decision is local: no telemetry, no network in ``auto`` mode.
-* Failures are fail-soft *at construction* but fail-closed *at enforcement*:
-  a firewall built on the heuristic engine still blocks what it measures.
+Invariants: the engine never sees row data, every decision is local (no
+network in ``auto`` mode), and the firewall built on any backend is fail-closed
+at enforcement even though backend construction fails soft.
 """
 
 from __future__ import annotations
@@ -277,20 +263,19 @@ class OnnxDecisionEngine:
     # The ONNX path requires a tokenizer artefact next to the model. Without
     # one there is no correct way to feed text, so the honest behaviour is to
     # refuse rather than emit garbage decisions.
-    def decide_boolean(self, statement: str, context: str) -> Decision:
+    def _unsupported(self, *args: object) -> Decision:
         raise DecisionBackendError(
             "ONNX decision heads require a tokenizer artefact; see datawhisper docs"
         )
+
+    def decide_boolean(self, statement: str, context: str) -> Decision:
+        return self._unsupported()
 
     def classify_choice(self, query: str, options: Sequence[str]) -> Decision:
-        raise DecisionBackendError(
-            "ONNX decision heads require a tokenizer artefact; see datawhisper docs"
-        )
+        return self._unsupported()
 
     def score_risk(self, text: str, criteria: str = "") -> Decision:
-        raise DecisionBackendError(
-            "ONNX decision heads require a tokenizer artefact; see datawhisper docs"
-        )
+        return self._unsupported()
 
 
 # ---------------------------------------------------------------------------

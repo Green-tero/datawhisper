@@ -8,7 +8,7 @@ instead of re-deriving them.
 
 - **Product:** DataWhisper — local-first agentic database copilot and CI/CD
   database governance engine. Public repo: `Green-tero/datawhisper`.
-- **Release line:** 1.3.x (current patch 1.3.8). Keep `pyproject.toml`,
+- **Release line:** 1.3.x (current patch 1.3.9). Keep `pyproject.toml`,
   `datawhisper/__init__.py`, README badge and CHANGELOG in sync on every bump.
 - **Dual role:** interactive local CLI/dashboard AND an autonomous PR auditor
   GitHub Action. Both share the same core.

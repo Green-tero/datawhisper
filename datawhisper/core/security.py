@@ -231,22 +231,23 @@ class SemanticFirewall:
     def threshold(self) -> float:
         return self.config.risk_threshold
 
-    def _blocked(self, decision: Decision, reasons: list[str]) -> bool:
+    def _blocked(self, decision: Decision) -> bool:
         return self.config.firewall_enabled and decision.value > self.threshold
 
-    def check_context(self, text: str) -> Decision:
-        """Score a natural-language input for injection risk. Raises on breach."""
-        result = self._decision.score_risk(text, criteria="prompt_injection")
-        if self._blocked(result, []):
+    def _enforce(self, text: str, criteria: str) -> Decision:
+        """Score ``text`` and raise :class:`SecurityViolation` on breach."""
+        result = self._decision.score_risk(text, criteria=criteria)
+        if self._blocked(result):
             raise SecurityViolation(result.value, self.reasons_for(text), self.threshold)
         return result
 
+    def check_context(self, text: str) -> Decision:
+        """Score a natural-language input for injection risk. Raises on breach."""
+        return self._enforce(text, "prompt_injection")
+
     def check_statement(self, sql: str) -> Decision:
         """Score one SQL statement for destructive intent. Raises on breach."""
-        result = self._decision.score_risk(sql, criteria="statement_mutation")
-        if self._blocked(result, []):
-            raise SecurityViolation(result.value, self.reasons_for(sql), self.threshold)
-        return result
+        return self._enforce(sql, "statement_mutation")
 
     def reasons_for(self, text: str) -> list[str]:
         """Human-readable explanations for a rejection, derived from the rules."""

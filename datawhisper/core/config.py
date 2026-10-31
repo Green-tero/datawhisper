@@ -161,14 +161,14 @@ class DataWhisperConfig(BaseModel):
 
         def _float(name: str, default: float) -> float:
             try:
-                return float(source[name])
-            except (KeyError, ValueError):
+                return float(source.get(name, default))
+            except ValueError:
                 return default
 
         def _int(name: str, default: int) -> int:
             try:
-                return int(source[name])
-            except (KeyError, ValueError):
+                return int(source.get(name, default))
+            except ValueError:
                 return default
 
         def _bool(name: str, default: bool) -> bool:
@@ -177,13 +177,14 @@ class DataWhisperConfig(BaseModel):
                 return default
             return raw.strip().lower() in {"1", "true", "yes", "on"}
 
-        mode = source.get("DW_PII_MODE", "hash").strip().lower()
-        if mode not in {"hash", "mask", "tokenize", "redact"}:
-            mode = "hash"
+        def _choice(name: str, default: str, options: set[str]) -> str:
+            value = source.get(name, default).strip().lower()
+            return value if value in options else default
 
-        plan_policy = source.get("DW_PLAN_FAILURE_POLICY", "allow_with_budget").strip().lower()
-        if plan_policy not in {"allow_with_budget", "reject"}:
-            plan_policy = "allow_with_budget"
+        mode = _choice("DW_PII_MODE", "hash", {"hash", "mask", "tokenize", "redact"})
+        plan_policy = _choice(
+            "DW_PLAN_FAILURE_POLICY", "allow_with_budget", {"allow_with_budget", "reject"}
+        )
 
         allow_columns = tuple(
             column.strip()
@@ -191,9 +192,9 @@ class DataWhisperConfig(BaseModel):
             if column.strip()
         )
 
-        decision_provider = source.get("DW_DECISION_PROVIDER", "auto").strip().lower()
-        if decision_provider not in {"auto", "heuristic", "onnx", "http"}:
-            decision_provider = "auto"
+        decision_provider = _choice(
+            "DW_DECISION_PROVIDER", "auto", {"auto", "heuristic", "onnx", "http"}
+        )
         risk_threshold = _float("DW_RISK_THRESHOLD", 0.7)
 
         return cls(
