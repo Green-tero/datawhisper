@@ -284,3 +284,15 @@ def test_subgraph_isolation_pruning(large_catalog: CatalogSnapshot) -> None:
     assert "t10" in pruned.table_names
     # Verify that distant unconnected/irrelevant tables are safely pruned
     assert len(pruned.tables) <= 7
+
+
+def test_shortest_path_caching(large_catalog: CatalogSnapshot) -> None:
+    graph = _graph(large_catalog)
+    # First traversal computes and caches the path
+    plan1 = graph.shortest_path("t5", "t40")
+    assert plan1 is not None
+    assert ("t5", "t40") in graph._path_cache
+
+    # Subsequent traversal retrieves the identical cached instance
+    plan2 = graph.shortest_path("t5", "t40")
+    assert plan2 is plan1

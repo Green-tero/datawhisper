@@ -598,6 +598,15 @@ class DuckDBBackend:
         with contextlib.suppress(Exception):
             self._conn.close()
 
+    def __del__(self) -> None:
+        self.close()
+
+    def __enter__(self) -> DuckDBBackend:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL
@@ -992,6 +1001,15 @@ class ExecutionEngine:
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
         self.backend.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+    def __enter__(self) -> ExecutionEngine:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     # ------------------------------------------------------------------
     # Internals

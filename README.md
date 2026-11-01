@@ -4,11 +4,11 @@ DataWhisper answers questions about your data and reviews database changes in pu
 
 It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits and data masking stay in code you can read.
 
-**Current release: 1.4.2.** See [CHANGELOG.md](CHANGELOG.md).
+**Current release: 1.4.3.** See [CHANGELOG.md](CHANGELOG.md).
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Release](https://img.shields.io/badge/release-1.4.2-blue)
+![Release](https://img.shields.io/badge/release-1.4.3-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **Language / زبان:** open a section below. English is open by default.

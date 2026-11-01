@@ -454,3 +454,16 @@ def test_analytical_subqueries_in_where_and_having() -> None:
         "HAVING AVG(salary) > (SELECT AVG(salary) FROM employees)"
     )
     assert detect_cartesian_joins(q3, "sqlite") == []
+
+
+def test_hmac_session_salt_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DW_PII_HMAC_SALT", "session-specific-salt-12345")
+    scrubber1 = PrivacyScrubber(PrivacyConfig(mode="pseudonymize"))
+    scrubber2 = PrivacyScrubber(PrivacyConfig(mode="pseudonymize"))
+
+    res1, _ = scrubber1.scrub(["email"], [["user@example.com"]])
+    res2, _ = scrubber2.scrub(["email"], [["user@example.com"]])
+
+    # Stable across instances in the same session
+    assert res1[0][0] == res2[0][0]
+    assert res1[0][0].startswith("ps_")

@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
+import secrets
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
 from typing import Any
@@ -35,6 +37,8 @@ from pydantic import BaseModel
 from datawhisper.core.config import PrivacyConfig
 from datawhisper.core.decision_engine import DecisionEngine
 from datawhisper.core.models import RedactionReport
+
+_SESSION_SALT_FALLBACK: str = secrets.token_hex(16)
 
 
 class PiiCategory(StrEnum):
@@ -257,6 +261,13 @@ class PrivacyScrubber:
         self._allow = {name.lower() for name in self.config.column_allowlist}
         self._tokens: dict[tuple[PiiCategory, str], str] = {}
         self._counters: dict[PiiCategory, int] = {}
+        env_hmac_salt = os.environ.get("DW_PII_HMAC_SALT", "").strip()
+        if env_hmac_salt:
+            self._session_salt = env_hmac_salt
+        elif self.config.salt and self.config.salt != "datawhisper-local-salt":
+            self._session_salt = self.config.salt
+        else:
+            self._session_salt = os.environ.get("DW_PII_SALT") or _SESSION_SALT_FALLBACK
         # Optional System-1 classifier: identifiers the exact token map does
         # not know are judged locally by the decision engine. The static map
         # always wins - it is exact and free - so the engine only settles
@@ -388,7 +399,7 @@ class PrivacyScrubber:
         if mode == "pseudonymize":
             normalized = str(value).strip()
             digest = hmac.new(
-                self.config.salt.encode("utf-8"),
+                self._session_salt.encode("utf-8"),
                 normalized.encode("utf-8"),
                 hashlib.sha256,
             ).hexdigest()[: self.config.hash_length]

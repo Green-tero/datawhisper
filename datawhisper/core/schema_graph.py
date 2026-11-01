@@ -273,6 +273,7 @@ class SchemaGraph:
         self._idf: dict[str, float] = {}
         self._avgdl: float = 0.0
         self._domains: dict[str, list[str]] = {}
+        self._path_cache: dict[tuple[str, str], JoinPlan | None] = {}
         self._build()
 
     # ------------------------------------------------------------------
@@ -646,6 +647,10 @@ class SchemaGraph:
         if start == goal:
             return JoinPlan(tables=[start], steps=[], hops=0)
 
+        cache_key = (start, goal)
+        if cache_key in self._path_cache:
+            return self._path_cache[cache_key]
+
         distances: dict[str, float] = {start: 0.0}
         previous: dict[str, tuple[str, JoinStep]] = {}
         counter = 0
@@ -668,6 +673,7 @@ class SchemaGraph:
                     heapq.heappush(queue, (candidate, counter, neighbour))
 
         if goal not in distances:
+            self._path_cache[cache_key] = None
             return None
         steps: list[JoinStep] = []
         order: list[str] = [goal]
@@ -679,7 +685,9 @@ class SchemaGraph:
             cursor = parent
         steps.reverse()
         order.reverse()
-        return JoinPlan(tables=order, steps=steps, hops=len(steps))
+        plan = JoinPlan(tables=order, steps=steps, hops=len(steps))
+        self._path_cache[cache_key] = plan
+        return plan
 
     def connect(self, tables: Sequence[str]) -> JoinPlan:
         """Connect a set of tables with a minimum-ish spanning tree of FK paths.

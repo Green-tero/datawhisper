@@ -247,7 +247,8 @@ class DataWhisperConfig(BaseModel):
             privacy=PrivacyConfig(
                 enabled=_bool("DW_PII_ENABLED", True),
                 mode=mode,  # type: ignore[arg-type]
-                salt=source.get("DW_PII_SALT", "datawhisper-local-salt"),
+                salt=source.get("DW_PII_HMAC_SALT")
+                or source.get("DW_PII_SALT", "datawhisper-local-salt"),
                 hash_length=_int("DW_PII_HASH_LENGTH", 16),
                 column_allowlist=allow_columns,
             ),

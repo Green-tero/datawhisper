@@ -320,3 +320,27 @@ def test_driver_errors_are_scrubbed_before_reaching_the_agent() -> None:
         assert "email_" in message
     finally:
         engine.close()
+
+
+def test_duckdb_and_engine_lifecycle_cleanup() -> None:
+    duckdb_mod = pytest.importorskip("duckdb")
+    from datawhisper.core.database import DuckDBBackend
+
+    conn = duckdb_mod.connect(":memory:")
+    conn.execute("CREATE TABLE sample_data (id INT, val VARCHAR)")
+    conn.execute("INSERT INTO sample_data VALUES (1, 'hello'), (2, 'world')")
+
+    # Context manager lifecycle for DuckDBBackend
+    with DuckDBBackend(conn) as backend:
+        res = backend.fetch("SELECT COUNT(*) FROM sample_data", limit=10)
+        assert res.to_rows()[0][0] == 2
+        assert not backend._closed
+    assert backend._closed
+
+    # ExecutionEngine context manager & disposal
+    engine = ExecutionEngine(DuckDBBackend(duckdb_mod.connect(":memory:")), DataWhisperConfig())
+    with engine:
+        rows = engine.execute("SELECT 1").rows
+        assert len(rows) == 1
+    # Ensure backend connection closed on exit
+    assert engine.backend._closed  # type: ignore[attr-defined]

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.3] - 2026-11-01
+
+### Fixed
+
+- **DuckDB Session Cleanup**: Ensured DuckDB connection cursors and in-memory tables are strictly closed on session garbage collection or engine disposal via `__del__` and context manager support to prevent connection leaks during repetitive CLI runs.
+
+### Added
+
+- **HMAC Pseudonymization Session Salt**: Added support for `DW_PII_HMAC_SALT` environment variable with secure session fallback to ensure deterministic tokens remain stable across sub-processes during the same session while avoiding cross-run correlation when unconfigured.
+- **Schema Graph Path Caching**: Cached computed Dijkstra join paths for frequent table pairs during long-running sessions to shave off recurring traversal latency.
+
 ## [1.4.2] - 2026-11-01
 
 ### Added

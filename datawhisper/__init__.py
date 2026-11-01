@@ -7,6 +7,6 @@ before execution), and scrubs sensitive values before any result reaches an
 LLM context, a terminal or a pull-request comment.
 """
 
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 
 __all__ = ["__version__"]
