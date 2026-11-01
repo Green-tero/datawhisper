@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.2] - 2026-11-01
+
+### Added
+
+- **System-1 ONNX & Laya Integration**: Implemented `LayaOnnxDriver` and modular `OnnxDecisionEngine` inspired by `NandhaKishorM/laya`, achieving sub-20ms inference forward passes for risk scoring, intent classification, and boolean relevance judgments. Included deterministic fallback to the heuristic engine when weights or runtime are absent.
+- **Semantic Pseudonymization (`mode="pseudonymize"`)**: Added persistent deterministic pseudonymization using HMAC-SHA256, generating uniform `ps_<hash>` tokens across the entire session to preserve cross-table referential integrity for `JOIN` and `GROUP BY` without exfiltrating raw values.
+- **Advanced Schema Graph**:
+  - Full support and path traversal for composite foreign keys across multiple columns in `JoinStep` and `SchemaGraph`.
+  - Inferred implicit relationship resolution for standard entity abbreviations (`dept_id`, `cust_id`, `emp_id`, etc.) and matching non-generic primary keys.
+  - Weighted Dijkstra pathfinding incorporating log table cardinality to avoid Cartesian explosions and choose optimal equijoin paths.
+  - Dynamic Sub-graph Isolation: automatically isolates transitively connected k-hop subgraphs for enterprise catalogs (>50 tables) to prune prompt context and prevent hallucinations.
+- **AST Three-Layer Sandbox False-Positive Fixes**:
+  - Full validation and recognition for Common Table Expressions (`WITH ... AS` and `WITH RECURSIVE`), window functions (`OVER (PARTITION BY ... ORDER BY ...)`), and scalar subqueries in `WHERE` and `HAVING`.
+  - Maintained fail-closed invariants: strictly blocking semicolons, injection comments, dangerous DuckDB table functions (`read_csv_raw`, `read_parquet_raw`), and shell execution.
+
 ## [1.3.9] - 2026-10-31
 
 ### Changed

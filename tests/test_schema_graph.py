@@ -203,3 +203,84 @@ def test_parent_primary_key_is_not_labelled_foreign_key() -> None:
     child = next(t for t in children.tables if t.name == "orders")
     child_fk = next(c for c in child.columns if c.name == "customer_id")
     assert child_fk.foreign_key
+
+
+def test_composite_foreign_key_support() -> None:
+    from datawhisper.core.models import ForeignKeyInfo
+
+    catalog = CatalogSnapshot(
+        dialect="postgres",
+        tables=[
+            TableInfo(
+                name="order_headers",
+                columns=[
+                    ColumnInfo(name="tenant_id", type="INT", primary_key=True),
+                    ColumnInfo(name="order_id", type="INT", primary_key=True),
+                    ColumnInfo(name="status", type="VARCHAR"),
+                ],
+                row_count=1000,
+            ),
+            TableInfo(
+                name="order_lines",
+                columns=[
+                    ColumnInfo(name="tenant_id", type="INT"),
+                    ColumnInfo(name="order_id", type="INT"),
+                    ColumnInfo(name="line_no", type="INT", primary_key=True),
+                    ColumnInfo(name="item", type="VARCHAR"),
+                ],
+                foreign_keys=[
+                    ForeignKeyInfo(
+                        from_table="order_lines",
+                        from_columns=["tenant_id", "order_id"],
+                        to_table="order_headers",
+                        to_columns=["tenant_id", "order_id"],
+                    )
+                ],
+                row_count=5000,
+            ),
+        ],
+    )
+    graph = _graph(catalog)
+    plan = graph.shortest_path("order_lines", "order_headers")
+    assert plan is not None
+    assert plan.hops == 1
+    step = plan.steps[0]
+    assert "order_lines.tenant_id = order_headers.tenant_id" in step.sql_condition()
+    assert "order_lines.order_id = order_headers.order_id" in step.sql_condition()
+
+
+def test_implicit_relationship_inference() -> None:
+    catalog = CatalogSnapshot(
+        dialect="sqlite",
+        tables=[
+            TableInfo(
+                name="departments",
+                columns=[
+                    ColumnInfo(name="id", type="INT", primary_key=True),
+                    ColumnInfo(name="dept_name", type="VARCHAR"),
+                ],
+            ),
+            TableInfo(
+                name="employees",
+                columns=[
+                    ColumnInfo(name="id", type="INT", primary_key=True),
+                    ColumnInfo(name="dept_id", type="INT"),  # abbreviation convention
+                    ColumnInfo(name="name", type="VARCHAR"),
+                ],
+            ),
+        ],
+    )
+    graph = _graph(catalog, implicit_relations=True)
+    plan = graph.shortest_path("employees", "departments")
+    assert plan is not None
+    assert plan.hops == 1
+    assert "employees.dept_id = departments.id" in plan.steps[0].sql_condition()
+
+
+def test_subgraph_isolation_pruning(large_catalog: CatalogSnapshot) -> None:
+    # When catalog exceeds subgraph threshold, isolated cluster is extracted
+    graph = _graph(large_catalog, subgraph_isolation_threshold=20, max_tables=5)
+    pruned = graph.retrieve("t10 metric and data", top_k=5)
+    assert "t10" in pruned.table_names
+    # Verify that distant unconnected/irrelevant tables are safely pruned
+    assert len(pruned.tables) <= 7

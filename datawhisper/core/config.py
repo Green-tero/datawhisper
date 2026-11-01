@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ProviderName = Literal["gemini", "openai", "none"]
 DecisionProvider = Literal["auto", "heuristic", "onnx", "http"]
-RedactionMode = Literal["hash", "mask", "tokenize", "redact"]
+RedactionMode = Literal["hash", "mask", "tokenize", "redact", "pseudonymize"]
 PlanFailurePolicy = Literal["allow_with_budget", "reject"]
 
 
@@ -31,6 +31,7 @@ class DecisionConfig(BaseModel):
     request_timeout: float = Field(default=0.25, gt=0)
     risk_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     firewall_enabled: bool = True
+    fallback_to_heuristic: bool = True
 
 
 class SafetyThresholds(BaseModel):
@@ -97,6 +98,19 @@ class SchemaGraphConfig(BaseModel):
         description="Coarse-to-fine: pick domains first, then BM25 within them.",
     )
     max_domains: int = Field(default=3, ge=1, le=20)
+    subgraph_isolation_threshold: int = Field(
+        default=50,
+        ge=5,
+        description="Threshold of catalog tables to trigger dynamic sub-graph isolation.",
+    )
+    weighted_dijkstra: bool = Field(
+        default=True,
+        description="Weight Dijkstra join paths by table cardinality to avoid Cartesian explosion.",
+    )
+    implicit_relations: bool = Field(
+        default=True,
+        description="Infer implicit foreign key relations using standard naming conventions.",
+    )
 
 
 class LLMConfig(BaseModel):
@@ -181,7 +195,9 @@ class DataWhisperConfig(BaseModel):
             value = source.get(name, default).strip().lower()
             return value if value in options else default
 
-        mode = _choice("DW_PII_MODE", "hash", {"hash", "mask", "tokenize", "redact"})
+        mode = _choice(
+            "DW_PII_MODE", "hash", {"hash", "mask", "tokenize", "redact", "pseudonymize"}
+        )
         plan_policy = _choice(
             "DW_PLAN_FAILURE_POLICY", "allow_with_budget", {"allow_with_budget", "reject"}
         )
@@ -205,6 +221,7 @@ class DataWhisperConfig(BaseModel):
                 request_timeout=_float("DW_DECISION_TIMEOUT", 0.25),
                 risk_threshold=min(max(risk_threshold, 0.0), 1.0),
                 firewall_enabled=_bool("DW_FIREWALL_ENABLED", True),
+                fallback_to_heuristic=_bool("DW_DECISION_FALLBACK", True),
             ),
             llm=LLMConfig(
                 provider=provider,  # type: ignore[arg-type]
@@ -241,6 +258,9 @@ class DataWhisperConfig(BaseModel):
                 max_context_tokens=_int("DW_GRAPH_MAX_TOKENS", 1500),
                 bm25_k1=_float("DW_BM25_K1", 1.5),
                 bm25_b=_float("DW_BM25_B", 0.75),
+                subgraph_isolation_threshold=_int("DW_GRAPH_SUBGRAPH_THRESHOLD", 50),
+                weighted_dijkstra=_bool("DW_GRAPH_WEIGHTED_DIJKSTRA", True),
+                implicit_relations=_bool("DW_GRAPH_IMPLICIT_RELATIONS", True),
             ),
             github=GitHubConfig(
                 token=source.get("DATAWHISPER_GITHUB_TOKEN") or source.get("GITHUB_TOKEN") or "",

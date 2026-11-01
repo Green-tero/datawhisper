@@ -39,6 +39,7 @@ SQLDialect = Literal["sqlite", "duckdb", "postgres"]
 
 _ALLOWED_ROOT_NAMES: Final = (
     "Select",
+    "With",
     "Union",
     "Except",
     "Intersect",
@@ -84,11 +85,17 @@ _BLOCKED_FUNCTIONS: Final[frozenset[str]] = frozenset(
         # DuckDB readers/writers
         "read_csv",
         "read_csv_auto",
+        "read_csv_raw",
         "read_json",
         "read_json_auto",
+        "read_json_raw",
         "read_ndjson",
         "read_ndjson_auto",
+        "read_ndjson_raw",
         "read_parquet",
+        "read_parquet_raw",
+        "scan_parquet",
+        "scan_csv",
         "read_xlsx",
         "parquet_scan",
         "parquet_metadata",
@@ -353,7 +360,13 @@ def _semantic_checks(root: exp.Expression) -> list[ValidationViolation]:
             )
             continue
         if isinstance(node, exp.Func):
-            blocked = _function_names(node) & _BLOCKED_FUNCTIONS
+            func_names = _function_names(node)
+            blocked = func_names & _BLOCKED_FUNCTIONS
+            if not blocked:
+                for fn in func_names:
+                    if fn.endswith("_raw") and (fn.startswith("read_") or fn.startswith("scan_")):
+                        blocked = {fn}
+                        break
             if blocked:
                 violations.append(
                     ValidationViolation(
@@ -470,7 +483,10 @@ def current_limit(sql: str, dialect: str = "sqlite") -> int | None:
         return None
     # find() would return a LIMIT inside a subquery, which does not bound the
     # outer result set. Only the root clause bounds the statement.
-    limit = tree.args.get("limit")
+    target = (
+        tree.this if isinstance(tree, exp.With) and isinstance(tree.this, exp.Expression) else tree
+    )
+    limit = target.args.get("limit")
     if not isinstance(limit, exp.Limit):
         return None
     expression = limit.expression
@@ -485,7 +501,10 @@ def apply_limit(sql: str, dialect: str, limit: int) -> str | None:
         tree = sqlglot.parse_one(sql, read=dialect)
     except sqlglot.errors.ParseError:
         return None
-    existing = tree.args.get("limit")
+    target = (
+        tree.this if isinstance(tree, exp.With) and isinstance(tree.this, exp.Expression) else tree
+    )
+    existing = target.args.get("limit")
     if isinstance(existing, exp.Limit):
         expression = existing.expression
         if (
@@ -549,6 +568,12 @@ def _scope_tables(select: exp.Select) -> dict[str, str]:
         if table.find_ancestor(exp.Select) is not select:
             continue
         mapping[(table.alias or table.name).lower()] = table.name.lower()
+    for sub in select.find_all(exp.Subquery):
+        if sub.find_ancestor(exp.Select) is not select:
+            continue
+        alias = (sub.alias or "").lower()
+        if alias:
+            mapping[alias] = alias
     return mapping
 
 
@@ -620,11 +645,21 @@ def detect_cartesian_joins(sql: str, dialect: str = "sqlite") -> list[list[str]]
                 previous = joined
 
         where = select.args.get("where")
-        if isinstance(where, exp.Expression):
-            for predicate in where.find_all(exp.Binary):
+        having = select.args.get("having")
+        for clause in (where, having):
+            if not isinstance(clause, exp.Expression):
+                continue
+            for predicate in clause.find_all(exp.Binary):
                 if predicate.find_ancestor(exp.Select) is not select:
                     continue
                 linked = _aliases_in(predicate, scope)
+                if len(linked) >= 2:
+                    ordered = sorted(linked)
+                    for alias in ordered[1:]:
+                        union.union(ordered[0], alias)
+            # Correlated subqueries or IN/EXISTS expressions across outer tables
+            for sub in clause.find_all(exp.Subquery, exp.Select):
+                linked = _aliases_in(sub, scope)
                 if len(linked) >= 2:
                     ordered = sorted(linked)
                     for alias in ordered[1:]:

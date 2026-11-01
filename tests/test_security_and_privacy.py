@@ -51,12 +51,44 @@ ATTACKS = [
     ("SELECT pg_sleep(30)", "postgres"),
     ("SELECT * FROM secret_db.main.orders", "duckdb"),
     ("WITH t AS (SELECT 1 AS x) DELETE FROM orders", "sqlite"),
+    ("SELECT * FROM read_parquet_raw('data.parquet')", "duckdb"),
+    ("SELECT * FROM read_csv_raw('data.csv')", "duckdb"),
+    ("SELECT shell('rm -rf /')", "sqlite"),
 ]
 
 VALID = [
     ("SELECT 1", "sqlite"),
     ("SELECT COUNT(*) FROM orders", "sqlite"),
     ("WITH t AS (SELECT 1 AS x) SELECT * FROM t", "sqlite"),
+    (
+        "WITH regional_sales AS (SELECT region, SUM(amount) AS total FROM sales GROUP BY region) "
+        "SELECT * FROM regional_sales",
+        "sqlite",
+    ),
+    (
+        "SELECT id, name, salary, RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) as rnk "
+        "FROM employees",
+        "sqlite",
+    ),
+    (
+        "SELECT id, name FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > 100)",
+        "sqlite",
+    ),
+    (
+        "SELECT dept, AVG(salary) FROM employees GROUP BY dept "
+        "HAVING AVG(salary) > (SELECT AVG(salary) FROM employees)",
+        "sqlite",
+    ),
+    (
+        "SELECT u.id, (SELECT MAX(created_at) FROM orders o WHERE o.user_id = u.id) as last_order "
+        "FROM users u",
+        "sqlite",
+    ),
+    (
+        "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 10) "
+        "SELECT x FROM cnt",
+        "sqlite",
+    ),
     ("SELECT status FROM orders UNION SELECT 'x' AS status", "sqlite"),
     ("SELECT * FROM main.orders", "sqlite"),
     ("SELECT * FROM public.orders", "postgres"),
@@ -373,3 +405,52 @@ def test_gate_uses_ast_tables_when_plan_has_no_estimates() -> None:
     plan = PlanInfo(dialect="sqlite", nodes=[PlanNode(node_type="SCAN", table=None)])
     decision = gate.evaluate("SELECT * FROM orders", plan, {"orders": 12})
     assert decision.action == "limit"
+
+
+def test_privacy_pseudonymize_referential_integrity() -> None:
+    config = PrivacyConfig(mode="pseudonymize", salt="test-salt-v1.4.2")
+    scrubber = PrivacyScrubber(config)
+
+    # 1. Test email column in customers
+    customers_rows = [
+        ["101", "alice@example.com", "Alice Smith"],
+        ["102", "bob@example.com", "Bob Jones"],
+        ["103", "alice@example.com", "Alice Duplicate"],
+    ]
+    scrubbed_c, rep_c = scrubber.scrub(["id", "email", "name"], customers_rows)
+    assert rep_c.mode == "pseudonymize"
+    assert rep_c.total == 3
+
+    # Alice's pseudonym must be identical across occurrences
+    alice_token = scrubbed_c[0][1]
+    assert alice_token.startswith("ps_")
+    assert alice_token == scrubbed_c[2][1]
+    assert alice_token != scrubbed_c[1][1]
+
+    # 2. Test transactions table where contact_email joins with customers
+    txn_rows = [
+        ["tx_1", "alice@example.com", 150.0],
+        ["tx_2", "bob@example.com", 200.0],
+    ]
+    scrubbed_t, _ = scrubber.scrub(["txn_id", "contact_email", "amount"], txn_rows)
+    assert scrubbed_t[0][1] == alice_token
+
+    # Integrity check: JOIN key equality is preserved!
+    assert scrubbed_c[0][1] == scrubbed_t[0][1]
+    assert "alice@example.com" not in str(scrubbed_c)
+    assert "alice@example.com" not in str(scrubbed_t)
+
+
+def test_analytical_subqueries_in_where_and_having() -> None:
+    # Scalar subqueries in WHERE and HAVING are accepted and not rejected
+    q1 = "SELECT id, name FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > 50)"
+    assert detect_cartesian_joins(q1, "sqlite") == []
+
+    q2 = "SELECT a.id, b.id FROM t1 a JOIN t2 b ON a.id = b.id WHERE b.id IN (SELECT id FROM t3)"
+    assert detect_cartesian_joins(q2, "sqlite") == []
+
+    q3 = (
+        "SELECT dept, AVG(salary) FROM employees GROUP BY dept "
+        "HAVING AVG(salary) > (SELECT AVG(salary) FROM employees)"
+    )
+    assert detect_cartesian_joins(q3, "sqlite") == []

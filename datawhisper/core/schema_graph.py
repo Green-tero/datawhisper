@@ -27,6 +27,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -75,6 +76,20 @@ _STOPWORDS = frozenset(
 )
 
 
+_COMMON_ABBREVIATIONS: dict[str, tuple[str, ...]] = {
+    "dept": ("department", "departments"),
+    "cust": ("customer", "customers"),
+    "emp": ("employee", "employees"),
+    "usr": ("user", "users"),
+    "org": ("organization", "organizations"),
+    "cat": ("category", "categories"),
+    "acc": ("account", "accounts"),
+    "acct": ("account", "accounts"),
+    "prod": ("product", "products"),
+    "inv": ("invoice", "invoices"),
+}
+
+
 def tokenize(text: str) -> list[str]:
     """Split identifiers and prose into lowercase unigrams.
 
@@ -117,11 +132,28 @@ class JoinStep(BaseModel):
     """One equijoin edge: ``left_table.left_column = right_table.right_column``."""
 
     left_table: str
-    left_column: str
+    left_column: str = ""
     right_table: str
-    right_column: str
+    right_column: str = ""
+    left_columns: list[str] = Field(default_factory=list)
+    right_columns: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.left_columns and self.left_column:
+            object.__setattr__(self, "left_columns", [self.left_column])
+        elif self.left_columns and not self.left_column:
+            object.__setattr__(self, "left_column", self.left_columns[0])
+        if not self.right_columns and self.right_column:
+            object.__setattr__(self, "right_columns", [self.right_column])
+        elif self.right_columns and not self.right_column:
+            object.__setattr__(self, "right_column", self.right_columns[0])
 
     def sql_condition(self) -> str:
+        if len(self.left_columns) > 1 and len(self.left_columns) == len(self.right_columns):
+            return " AND ".join(
+                f"{self.left_table}.{left_col} = {self.right_table}.{right_col}"
+                for left_col, right_col in zip(self.left_columns, self.right_columns, strict=False)
+            )
         return f"{self.left_table}.{self.left_column} = {self.right_table}.{self.right_column}"
 
     def reversed(self) -> JoinStep:
@@ -130,6 +162,8 @@ class JoinStep(BaseModel):
             left_column=self.right_column,
             right_table=self.left_table,
             right_column=self.left_column,
+            left_columns=list(self.right_columns),
+            right_columns=list(self.left_columns),
         )
 
 
@@ -253,13 +287,15 @@ class SchemaGraph:
                 key.from_columns
             )
         for key in self._keys:
-            if len(key.from_columns) != 1 or len(key.to_columns) != 1:
-                continue  # composite keys are rendered but not traversed
+            if not key.from_columns or not key.to_columns:
+                continue
             step = JoinStep(
                 left_table=key.from_table.lower(),
                 left_column=key.from_columns[0],
                 right_table=key.to_table.lower(),
                 right_column=key.to_columns[0],
+                left_columns=list(key.from_columns),
+                right_columns=list(key.to_columns),
             )
             self._adjacency.setdefault(step.left_table, {}).setdefault(step.right_table, step)
             self._adjacency.setdefault(step.right_table, {}).setdefault(
@@ -342,9 +378,17 @@ class SchemaGraph:
         for name, table in self._tables.items():
             for column in table.columns:
                 lowered = column.name.lower()
-                if not (lowered.endswith("_id") or lowered.endswith("_uuid")):
+                base: str | None = None
+                if lowered.endswith("_id"):
+                    base = lowered[:-3]
+                elif lowered.endswith("_uuid"):
+                    base = lowered[:-5]
+                elif self.config.implicit_relations and (
+                    lowered.startswith("fk_") or lowered.startswith("parent_")
+                ):
+                    base = lowered.split("_", 1)[1]
+                if not base:
                     continue
-                base = lowered[:-3] if lowered.endswith("_id") else lowered[:-5]
                 target_table = self._resolve_target(base)
                 if target_table is None or target_table.name.lower() == name:
                     continue
@@ -366,15 +410,41 @@ class SchemaGraph:
                         to_columns=[target_column],
                     )
                 )
+
+        if self.config.implicit_relations:
+            # Infer relationships when a column matches an exact non-generic PK name
+            for name, table in self._tables.items():
+                for column in table.columns:
+                    col_lowered = column.name.lower()
+                    if col_lowered in {"id", "uuid", "pk"}:
+                        continue
+                    for target_name, target_table in self._tables.items():
+                        if target_name == name:
+                            continue
+                        for pk_col in target_table.primary_key:
+                            if col_lowered == pk_col.lower():
+                                signature = (name, col_lowered, target_name, pk_col.lower())
+                                if signature not in declared:
+                                    declared.add(signature)
+                                    keys.append(
+                                        ForeignKeyInfo(
+                                            from_table=table.name,
+                                            from_columns=[column.name],
+                                            to_table=target_table.name,
+                                            to_columns=[pk_col],
+                                        )
+                                    )
         return keys
 
     def _resolve_target(self, base: str) -> TableInfo | None:
-        """Resolve an entity stem to a table using common pluralization."""
+        """Resolve an entity stem to a table using common pluralization and abbreviations."""
         candidates = {base, f"{base}s", f"{base}es"}
         if base.endswith("ies"):
             candidates.add(f"{base[:-3]}y")
         if base.endswith("y"):
             candidates.add(f"{base[:-1]}ies")
+        if base in _COMMON_ABBREVIATIONS:
+            candidates.update(_COMMON_ABBREVIATIONS[base])
         for candidate in candidates:
             table = self._tables.get(candidate)
             if table is not None:
@@ -430,6 +500,12 @@ class SchemaGraph:
             seeds = sorted(
                 hub_candidates, key=lambda name: (-len(self._adjacency.get(name, {})), name)
             )[:limit]
+
+        if len(self._tables) >= self.config.subgraph_isolation_threshold and seeds:
+            subgraph_tables = self._isolate_subgraph(seeds, max_hops=2)
+            scope = (
+                subgraph_tables if scope is None else (scope & subgraph_tables) or subgraph_tables
+            )
 
         plan = self.connect(seeds)
         allowed = limit + self.config.include_neighbor_tables
@@ -533,21 +609,47 @@ class SchemaGraph:
     # ------------------------------------------------------------------
     # Pathfinding
     # ------------------------------------------------------------------
+    def _isolate_subgraph(self, seeds: Sequence[str], max_hops: int = 2) -> set[str]:
+        """Extract transitively-connected subgraph around seeds for massive schemas."""
+        included: set[str] = set(seeds)
+        frontier = set(seeds)
+        for _ in range(max_hops):
+            next_frontier: set[str] = set()
+            for table in frontier:
+                for neighbor in self._adjacency.get(table, {}):
+                    if neighbor not in included:
+                        included.add(neighbor)
+                        next_frontier.add(neighbor)
+            frontier = next_frontier
+            if not frontier:
+                break
+        return included
+
+    def _edge_weight(self, source: str, target: str) -> float:
+        """Calculate weighted edge cost incorporating cardinality to prioritize safe join paths."""
+        if not self.config.weighted_dijkstra:
+            return 1.0
+        target_table = self._tables.get(target)
+        rows = (
+            target_table.row_count if target_table and target_table.row_count is not None else 1000
+        )
+        return 1.0 + min(math.log10(max(rows, 1)) / 10.0, 1.5)
+
     def neighbors(self, table: str) -> dict[str, JoinStep]:
         return self._adjacency.get(table.lower(), {})
 
     def shortest_path(self, source: str, target: str) -> JoinPlan | None:
-        """Dijkstra over FK edges (unit weight) returning the join chain."""
+        """Dijkstra over FK edges (weighted by cardinality) returning the join chain."""
         start, goal = source.lower(), target.lower()
         if start not in self._tables or goal not in self._tables:
             return None
         if start == goal:
             return JoinPlan(tables=[start], steps=[], hops=0)
 
-        distances: dict[str, int] = {start: 0}
+        distances: dict[str, float] = {start: 0.0}
         previous: dict[str, tuple[str, JoinStep]] = {}
         counter = 0
-        queue: list[tuple[int, int, str]] = [(0, counter, start)]
+        queue: list[tuple[float, int, str]] = [(0.0, counter, start)]
         visited: set[str] = set()
 
         while queue:
@@ -558,7 +660,7 @@ class SchemaGraph:
             if node == goal:
                 break
             for neighbour, step in self._adjacency.get(node, {}).items():
-                candidate = distance + 1
+                candidate = distance + self._edge_weight(node, neighbour)
                 if candidate < distances.get(neighbour, math.inf):
                     distances[neighbour] = candidate
                     previous[neighbour] = (node, step)
@@ -616,12 +718,12 @@ class SchemaGraph:
 
     def _multi_source_path(self, sources: Iterable[str], targets: set[str]) -> JoinPlan | None:
         """Dijkstra from many sources; returns the closest path to any target."""
-        distances: dict[str, int] = dict.fromkeys(sources, 0)
+        distances: dict[str, float] = dict.fromkeys(sources, 0.0)
         previous: dict[str, tuple[str, JoinStep]] = {}
         counter = 0
-        queue: list[tuple[int, int, str]] = []
+        queue: list[tuple[float, int, str]] = []
         for source in sources:
-            queue.append((0, counter, source))
+            queue.append((0.0, counter, source))
             counter += 1
         heapq.heapify(queue)
         visited: set[str] = set()
@@ -636,7 +738,7 @@ class SchemaGraph:
                 goal = node
                 break
             for neighbour, step in self._adjacency.get(node, {}).items():
-                candidate = distance + 1
+                candidate = distance + self._edge_weight(node, neighbour)
                 if candidate < distances.get(neighbour, math.inf):
                     distances[neighbour] = candidate
                     previous[neighbour] = (node, step)

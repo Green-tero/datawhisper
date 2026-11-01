@@ -385,6 +385,14 @@ class PrivacyScrubber:
 
     def _render(self, category: PiiCategory, value: str) -> str:
         mode = self.config.mode
+        if mode == "pseudonymize":
+            normalized = str(value).strip()
+            digest = hmac.new(
+                self.config.salt.encode("utf-8"),
+                normalized.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()[: self.config.hash_length]
+            return f"ps_{digest}"
         if mode == "hash":
             digest = hmac.new(
                 self.config.salt.encode("utf-8"),
