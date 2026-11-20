@@ -998,12 +998,24 @@ class ExecutionEngine:
         """Expose bounded pagination for CLI ``--explain-only`` hints."""
         return apply_limit(sql, self.backend.dialect, self.config.cost.auto_limit)
 
+    def advise_query(self, sql: str) -> Any:
+        """Run AST-driven index advisory to propose optimal covering indexes."""
+        from datawhisper.core.advisor import IndexAdvisor
+
+        advisor = IndexAdvisor(dialect=self.backend.dialect)
+        return advisor.advise(sql, catalog=self.introspect())
+
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        self.backend.close()
+        if hasattr(self, "_executor"):
+            with contextlib.suppress(Exception):
+                self._executor.shutdown(wait=False, cancel_futures=True)
+        if hasattr(self, "backend") and self.backend is not None:
+            with contextlib.suppress(Exception):
+                self.backend.close()
 
     def __del__(self) -> None:
-        self.close()
+        with contextlib.suppress(Exception):
+            self.close()
 
     def __enter__(self) -> ExecutionEngine:
         return self

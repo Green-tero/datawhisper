@@ -117,6 +117,8 @@ class RedactionReport(BaseModel):
     columns: list[str] = Field(default_factory=list)
     rows_affected: int = 0
     mode: str = "hash"
+    dp_noise_injected: int = 0
+    dp_epsilon: float | None = None
 
     def merge(self, other: RedactionReport) -> RedactionReport:
         merged = dict(self.by_category)
@@ -128,6 +130,8 @@ class RedactionReport(BaseModel):
             columns=sorted({*self.columns, *other.columns}),
             rows_affected=self.rows_affected + other.rows_affected,
             mode=self.mode,
+            dp_noise_injected=self.dp_noise_injected + other.dp_noise_injected,
+            dp_epsilon=self.dp_epsilon or other.dp_epsilon,
         )
 
 

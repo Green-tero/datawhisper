@@ -25,6 +25,7 @@ from __future__ import annotations
 import heapq
 import math
 import re
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -274,6 +275,7 @@ class SchemaGraph:
         self._avgdl: float = 0.0
         self._domains: dict[str, list[str]] = {}
         self._path_cache: dict[tuple[str, str], JoinPlan | None] = {}
+        self._table_vectors: dict[str, list[float]] = {}
         self._build()
 
     # ------------------------------------------------------------------
@@ -318,6 +320,9 @@ class SchemaGraph:
         self._avgdl = (
             sum(len(tokens) for tokens in self._docs.values()) / total_docs if self._docs else 0.0
         )
+        dim = self.config.dense_embedding_dim
+        for name, doc_tokens in self._docs.items():
+            self._table_vectors[name] = self._compute_dense_vector(doc_tokens, dim)
         self._build_domains()
 
     def _build_domains(self) -> None:
@@ -479,10 +484,65 @@ class SchemaGraph:
             scores[name] = score
         return scores
 
+    def _compute_dense_vector(self, tokens: Sequence[str], dim: int = 128) -> list[float]:
+        """Project tokens and subwords into a normalized dense semantic vector space."""
+        vec = [0.0] * dim
+        if not tokens:
+            return vec
+        for token in tokens:
+            h = zlib.crc32(token.encode("utf-8"))
+            idx = h % dim
+            sign = 1.0 if ((h >> 16) & 1) else -1.0
+            weight = self._idf.get(token, 1.0)
+            vec[idx] += sign * weight
+            if len(token) >= 3:
+                for i in range(len(token) - 2):
+                    tri = token[i : i + 3]
+                    h_tri = zlib.crc32(tri.encode("utf-8"))
+                    idx_tri = h_tri % dim
+                    sign_tri = 1.0 if ((h_tri >> 16) & 1) else -1.0
+                    vec[idx_tri] += sign_tri * 0.4
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm > 0.0:
+            return [x / norm for x in vec]
+        return vec
+
+    def dense_score(self, query: str) -> dict[str, float]:
+        """Score tables using dense semantic hash projection vectors."""
+        tokens = tokenize(query)
+        if not tokens:
+            return dict.fromkeys(self._tables, 0.0)
+        dim = self.config.dense_embedding_dim
+        q_vec = self._compute_dense_vector(tokens, dim)
+        scores: dict[str, float] = {}
+        for name, t_vec in self._table_vectors.items():
+            dot = sum(q_vec[i] * t_vec[i] for i in range(len(q_vec)))
+            scores[name] = max(0.0, dot)
+        return scores
+
+    def hybrid_score(self, query: str) -> dict[str, float]:
+        """Hybrid table retrieval combining sparse BM25 and dense semantic projection."""
+        if not self.config.hybrid_dense_pruning:
+            return self.bm25(query)
+        bm25_scores = self.bm25(query)
+        dense_scores = self.dense_score(query)
+        max_bm25 = max(bm25_scores.values()) if bm25_scores else 0.0
+        alpha = self.config.hybrid_dense_weight
+
+        hybrid: dict[str, float] = {}
+        for name in self._tables:
+            b_norm = (bm25_scores.get(name, 0.0) / max_bm25) if max_bm25 > 0.0 else 0.0
+            d_val = dense_scores.get(name, 0.0)
+            score = (1.0 - alpha) * b_norm + alpha * d_val
+            if bm25_scores.get(name, 0.0) > 0.0:
+                score += bm25_scores[name] * 0.2
+            hybrid[name] = score
+        return hybrid
+
     def retrieve(self, query: str, top_k: int | None = None) -> PrunedSchema:
         """Select, connect and compress the sub-schema relevant to ``query``."""
         limit = top_k if top_k is not None else self.config.max_tables
-        scores = self.bm25(query)
+        scores = self.hybrid_score(query)
         tokens = tokenize(query)
 
         scope = self._domain_filter(query)

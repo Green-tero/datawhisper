@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.5.4] - 2026-11-21
+
+### Added
+
+- **Native Semantic Layer & Data Contracts**: Introduced `SemanticCatalog`, `MetricDefinition`, `DimensionDefinition`, and `TableContract` with declarative validation in `verify_table_contract` and CLI command `datawhisper contract` to govern business metrics and prevent model hallucinations.
+- **Differential Privacy ($\epsilon$-$\delta$ / Laplace Mechanism)**: Added `mode="differential_privacy"` with calibrated Laplace noise injection on analytical numeric metrics and aggregations to provide mathematical privacy guarantees against reconstruction and differencing attacks.
+- **Hybrid Schema Pruning (BM25 + Dense Semantic Hash Projection)**: Augmented sparse BM25 retrieval with a 128-dimensional dense semantic hash projection capturing subword morphology and semantic synonymy with zero external dependencies and sub-millisecond execution.
+- **Automated Index Advisor & Cost Optimizer**: Added AST-driven index recommendation engine (`IndexAdvisor`, `datawhisper advise`) proposing single and composite covering indexes with estimated cost reduction percentages.
+- **Synthetic Mock Data Generator**: Implemented `SyntheticDataGenerator` to generate structurally coherent, referentially integral test datasets directly from `CatalogSnapshot` for air-gapped CI test suites.
+
+### Fixed & Hardened
+
+- **Deterministic ONNX Tokenization**: Replaced process-randomized string hashing with CRC32 deterministic token ID projection (`_deterministic_token_id`), guaranteeing invariant determinism across processes and environments.
+- **Unified Policy Baseline**: Consolidated prompt injection and destructive SQL patterns into shared canonical structures across heuristic and neural inference drivers, guaranteeing consistent risk verdicts.
+- **Transparent Neural Telemetry**: Recorded explicit fallback status in decision telemetry when neural inference encounters shape or model faults instead of silently degrading.
+- **ExecutionEngine Lifecycle Safety**: Guarded `__del__` and `close()` with `hasattr` and exception suppression to prevent noisy destructor errors during interpreter teardown.
+- **Sanitized Blocked Functions**: Removed non-standard function pseudo-names from blocked AST lists.
+
 ## [1.4.3] - 2026-11-01
 
 ### Fixed

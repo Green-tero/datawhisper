@@ -16,7 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ProviderName = Literal["gemini", "openai", "none"]
 DecisionProvider = Literal["auto", "heuristic", "onnx", "http"]
-RedactionMode = Literal["hash", "mask", "tokenize", "redact", "pseudonymize"]
+RedactionMode = Literal[
+    "hash", "mask", "tokenize", "redact", "pseudonymize", "differential_privacy"
+]
 PlanFailurePolicy = Literal["allow_with_budget", "reject"]
 
 
@@ -65,12 +67,31 @@ class CostPolicy(BaseModel):
     plan_failure_policy: PlanFailurePolicy = "allow_with_budget"
 
 
+class DifferentialPrivacyConfig(BaseModel):
+    """Calibrated differential privacy parameters for aggregate and numerical outputs."""
+
+    model_config = ConfigDict(frozen=True)
+
+    epsilon: float = Field(default=1.0, gt=0.0, description="Privacy budget epsilon (> 0.0).")
+    delta: float = Field(default=1e-5, ge=0.0, description="Privacy parameter delta (>= 0.0).")
+    sensitivity: float = Field(default=1.0, gt=0.0, description="Global query sensitivity bound.")
+    clamp_min: float | None = Field(default=None, description="Optional lower clamping bound.")
+    clamp_max: float | None = Field(default=None, description="Optional upper clamping bound.")
+    seed: int | None = Field(
+        default=None, description="Deterministic PRNG seed for test stability."
+    )
+
+
 class PrivacyConfig(BaseModel):
     """PII scrubber configuration.
 
-    ``salt`` must be stable across CI runs when ``hash`` mode is used,
-    otherwise the same email produces different pseudonyms on every run and
-    trend comparisons break. Set ``DW_PII_SALT`` as a repository secret.
+    Salt Resolution Hierarchy:
+    1. ``DW_PII_HMAC_SALT`` (env) - Session-scoped HMAC pseudonymization salt.
+    2. ``DW_PII_SALT`` (env) - Persistent repository-level salt stable across CI runs.
+    3. ``salt`` (config) - Programmatically provided salt (default: ``"datawhisper-local-salt"``).
+    4. In ``pseudonymize`` mode only, if no explicit salt is configured, a secure random
+       per-process fallback prevents cross-session correlation while keeping ``hash`` mode
+       deterministic.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -80,6 +101,7 @@ class PrivacyConfig(BaseModel):
     salt: str = "datawhisper-local-salt"
     hash_length: int = Field(default=16, ge=8, le=64)
     column_allowlist: tuple[str, ...] = ()
+    dp: DifferentialPrivacyConfig = Field(default_factory=DifferentialPrivacyConfig)
 
 
 class SchemaGraphConfig(BaseModel):
@@ -110,6 +132,22 @@ class SchemaGraphConfig(BaseModel):
     implicit_relations: bool = Field(
         default=True,
         description="Infer implicit foreign key relations using standard naming conventions.",
+    )
+    hybrid_dense_pruning: bool = Field(
+        default=True,
+        description="Enable hybrid retrieval (BM25 sparse + dense semantic vector scoring).",
+    )
+    hybrid_dense_weight: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Weight of dense semantic scoring in hybrid table/column retrieval.",
+    )
+    dense_embedding_dim: int = Field(
+        default=128,
+        ge=16,
+        le=1024,
+        description="Dimensionality of dense semantic hash-projection vectors.",
     )
 
 
@@ -251,6 +289,22 @@ class DataWhisperConfig(BaseModel):
                 or source.get("DW_PII_SALT", "datawhisper-local-salt"),
                 hash_length=_int("DW_PII_HASH_LENGTH", 16),
                 column_allowlist=allow_columns,
+                dp=DifferentialPrivacyConfig(
+                    epsilon=_float("DW_PII_DP_EPSILON", 1.0),
+                    delta=_float("DW_PII_DP_DELTA", 1e-5),
+                    sensitivity=_float("DW_PII_DP_SENSITIVITY", 1.0),
+                    clamp_min=(
+                        _float("DW_PII_DP_CLAMP_MIN", 0.0)
+                        if "DW_PII_DP_CLAMP_MIN" in source
+                        else None
+                    ),
+                    clamp_max=(
+                        _float("DW_PII_DP_CLAMP_MAX", 0.0)
+                        if "DW_PII_DP_CLAMP_MAX" in source
+                        else None
+                    ),
+                    seed=_int("DW_PII_DP_SEED", 0) if "DW_PII_DP_SEED" in source else None,
+                ),
             ),
             schema_graph=SchemaGraphConfig(
                 max_tables=_int("DW_GRAPH_MAX_TABLES", 6),
@@ -262,6 +316,9 @@ class DataWhisperConfig(BaseModel):
                 subgraph_isolation_threshold=_int("DW_GRAPH_SUBGRAPH_THRESHOLD", 50),
                 weighted_dijkstra=_bool("DW_GRAPH_WEIGHTED_DIJKSTRA", True),
                 implicit_relations=_bool("DW_GRAPH_IMPLICIT_RELATIONS", True),
+                hybrid_dense_pruning=_bool("DW_GRAPH_HYBRID_DENSE", True),
+                hybrid_dense_weight=_float("DW_GRAPH_HYBRID_WEIGHT", 0.35),
+                dense_embedding_dim=_int("DW_GRAPH_DENSE_DIM", 128),
             ),
             github=GitHubConfig(
                 token=source.get("DATAWHISPER_GITHUB_TOKEN") or source.get("GITHUB_TOKEN") or "",

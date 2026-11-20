@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -122,6 +123,58 @@ def _now_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 4)
 
 
+# Canonical policy patterns shared across all backends. Ordered by specificity;
+# first hit wins so latency stays flat regardless of how many rules exist.
+SHARED_INJECTION_PATTERNS: tuple[tuple[str, float], ...] = (
+    (r"\bignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?)\b", 0.95),
+    (r"\bdisregard\s+(all\s+)?(previous|prior|your)\b", 0.95),
+    (r"\breveal\s+(your\s+)?(system\s+)?prompt\b", 0.9),
+    (r"\bprint\s+(your\s+)?(system\s+)?prompt\b", 0.9),
+    (r"\byou\s+are\s+now\s+(a|an|in)\b", 0.85),
+    (r"\bjailbreak\b", 0.9),
+    (r"\bdeveloper\s+mode\b", 0.8),
+    (r"\bact\s+as\s+.{0,40}\bwithout\s+(any\s+)?restrictions\b", 0.9),
+    (r"\bexfiltrate\b", 0.9),
+)
+
+# Destructive SQL intent. Weighted so the worst single signal alone can
+# cross the default 0.7 enforcement threshold.
+SHARED_DESTRUCTIVE_PATTERNS: tuple[tuple[str, float], ...] = (
+    (r"\b(drop|truncate)\s+(table|database|schema|index)\b", 0.85),
+    (r"\brevoke\b", 0.5),
+    (r"\bdelete\s+from\s+\w+\s*(;|$)", 0.80),
+    (r"\b(delete\s+from|update\s+\w+\s+set|insert\s+into|alter\s+table)\b", 0.45),
+    (r"\bgrant\b", 0.35),
+    (r"\bcopy\b", 0.3),
+    (r"\battach\s+(database|file)\b", 0.7),
+)
+
+SHARED_TENANT_PATTERN: str = r"\b(other|all|every)\s+tenants?\b|\bcross[-\s]tenant\b"
+
+
+def score_symbolic_risk(text: str) -> float:
+    """Deterministic symbolic risk evaluation shared across all backends."""
+    if not text:
+        return 0.0
+    lowered = text.lower()
+    risk = 0.0
+
+    for pattern, weight in SHARED_INJECTION_PATTERNS:
+        if re.search(pattern, lowered):
+            risk = max(risk, weight)
+    for pattern, weight in SHARED_DESTRUCTIVE_PATTERNS:
+        if re.search(pattern, lowered):
+            risk = max(risk, weight)
+    if re.search(SHARED_TENANT_PATTERN, lowered):
+        risk = max(risk, 0.65)
+    return round(min(risk, 1.0), 3)
+
+
+def _deterministic_token_id(token: str, vocab_size: int = 10000) -> int:
+    """Deterministic, process-independent token ID generation via CRC32."""
+    return zlib.crc32(token.encode("utf-8")) % vocab_size
+
+
 # ---------------------------------------------------------------------------
 # Heuristic backend (the always-on default)
 # ---------------------------------------------------------------------------
@@ -136,33 +189,6 @@ class HeuristicDecisionEngine:
     """
 
     name = "heuristic"
-
-    # Prompt-injection signatures. Ordered by specificity; first hit wins so
-    # latency stays flat regardless of how many rules exist.
-    _INJECTION_PATTERNS: tuple[tuple[str, float], ...] = (
-        (r"\bignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?)\b", 0.95),
-        (r"\bdisregard\s+(all\s+)?(previous|prior|your)\b", 0.95),
-        (r"\breveal\s+(your\s+)?(system\s+)?prompt\b", 0.9),
-        (r"\bprint\s+(your\s+)?(system\s+)?prompt\b", 0.9),
-        (r"\byou\s+are\s+now\s+(a|an|in)\b", 0.85),
-        (r"\bjailbreak\b", 0.9),
-        (r"\bdeveloper\s+mode\b", 0.8),
-        (r"\bact\s+as\s+.{0,40}\bwithout\s+(any\s+)?restrictions\b", 0.9),
-        (r"\bexfiltrate\b", 0.9),
-    )
-
-    # Destructive SQL intent. Weighted so the worst single signal alone can
-    # cross the default 0.7 enforcement threshold.
-    _DESTRUCTIVE_PATTERNS: tuple[tuple[str, float], ...] = (
-        (r"\b(drop|truncate)\s+(table|database|schema|index)\b", 0.75),
-        (r"\brevoke\b", 0.5),
-        (r"\b(delete\s+from|update\s+\w+\s+set|insert\s+into|alter\s+table)\b", 0.35),
-        (r"\bgrant\b", 0.35),
-        (r"\bcopy\b", 0.3),
-        (r"\battach\s+(database|file)\b", 0.6),
-    )
-
-    _TENANT_PATTERN = r"\b(other|all|every)\s+tenants?\b|\bcross[-\s]tenant\b"
 
     def decide_boolean(self, statement: str, context: str) -> Decision:
         """True when ``statement`` shares lexical evidence with ``context``.
@@ -205,31 +231,15 @@ class HeuristicDecisionEngine:
         results stay reproducible across call sites.
         """
         start = time.perf_counter()
-        if not text:
-            return Decision(0.0, self.name, _now_ms(start))
-        lowered = text.lower()
-        risk = 0.0
-
-        for pattern, weight in self._INJECTION_PATTERNS:
-            if re.search(pattern, lowered):
-                risk = max(risk, weight)
-        for pattern, weight in self._DESTRUCTIVE_PATTERNS:
-            if re.search(pattern, lowered):
-                risk = max(risk, weight)
-        if re.search(self._TENANT_PATTERN, lowered):
-            risk = max(risk, 0.6)
-        # Unbounded destructive DML is as dangerous as a DROP: it must cross
-        # the default 0.7 enforcement threshold on its own.
-        if re.search(r"\b(delete\s+from\s+\w+)\s*(;|$)", lowered):
-            risk = max(risk, 0.75)
-        return Decision(round(min(risk, 1.0), 3), self.name, _now_ms(start))
+        risk = score_symbolic_risk(text)
+        return Decision(risk, self.name, _now_ms(start))
 
 
 # ---------------------------------------------------------------------------
-# ONNX / Laya backend (local weights, sub-20ms modular inference driver)
+# ONNX / Neural inference backend (local weights, sub-20ms modular driver)
 # ---------------------------------------------------------------------------
 class LayaOnnxDriver:
-    """Lightweight inference driver inspired by NandhaKishorM/laya.
+    """Lightweight neural inference driver for sub-20ms System-1 decisions.
 
     Provides sub-20ms forward evaluations using ONNX Runtime when available,
     or a calibrated zero-dependency vector kernel when onnxruntime is absent.
@@ -241,12 +251,15 @@ class LayaOnnxDriver:
         self.model_path = model_path
         self.max_length = max_length
         self._ort_session = None
+        self.last_inference_path: str = "vector_kernel"
         try:
             import onnxruntime as ort  # type: ignore[import-not-found]
 
             self._ort_session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            self.last_inference_path = "onnx"
         except Exception:
             self._ort_session = None
+            self.last_inference_path = "vector_kernel"
 
     def featurize(self, text: str) -> dict[str, float]:
         """Fast character/token n-gram featurizer for query analysis (<1ms)."""
@@ -266,11 +279,12 @@ class LayaOnnxDriver:
         """Score risk in [0.0, 1.0] using the ONNX model or calibrated driver."""
         if not text:
             return 0.0
+        symbolic_floor = score_symbolic_risk(text)
         lowered = text.lower()
         if self._ort_session is not None:
             try:
                 input_name = self._ort_session.get_inputs()[0].name
-                tokens = [hash(t) % 10000 for t in re.findall(r"[a-z0-9_]+", lowered)][
+                tokens = [_deterministic_token_id(t) for t in re.findall(r"[a-z0-9_]+", lowered)][
                     : self.max_length
                 ]
                 if not tokens:
@@ -284,24 +298,16 @@ class LayaOnnxDriver:
                     if hasattr(outputs[0], "__getitem__")
                     else float(outputs[0])
                 )
-                return min(max(1.0 / (1.0 + math.exp(-val)), 0.0), 1.0)
+                model_score = min(max(1.0 / (1.0 + math.exp(-val)), 0.0), 1.0)
+                self.last_inference_path = "onnx"
+                # Neuro-symbolic contract: the model adds signal, never drops below symbolic floor
+                return max(symbolic_floor, model_score)
             except Exception:
-                pass
+                self.last_inference_path = "fallback:symbolic"
+        else:
+            self.last_inference_path = "vector_kernel"
 
-        risk = 0.0
-        patterns = (
-            (r"\b(drop|truncate)\s+(table|database|schema|index)\b", 0.85),
-            (r"\bdelete\s+from\s+\w+\s*(;|$)", 0.80),
-            (r"\b(delete\s+from|update\s+\w+\s+set|insert\s+into|alter\s+table)\b", 0.45),
-            (r"\b(ignore|disregard)\s+(all\s+)?(previous|prior)\b", 0.95),
-            (r"\breveal\s+(your\s+)?prompt\b", 0.90),
-            (r"\b(other|all|every)\s+tenants?\b|\bcross[-\s]tenant\b", 0.65),
-            (r"\battach\s+(database|file)\b", 0.70),
-        )
-        for pattern, weight in patterns:
-            if re.search(pattern, lowered):
-                risk = max(risk, weight)
-        return min(risk, 1.0)
+        return symbolic_floor
 
     def classify_choice(self, query: str, options: Sequence[str]) -> str:
         """Classify query intent into one of the options with sub-20ms forward pass."""
@@ -362,7 +368,10 @@ class OnnxDecisionEngine:
     def score_risk(self, text: str, criteria: str = "") -> Decision:
         start = time.perf_counter()
         val = self.driver.score_risk(text, criteria)
-        return Decision(round(val, 3), self.name, _now_ms(start))
+        backend_name = self.name
+        if getattr(self.driver, "last_inference_path", "onnx") == "fallback:symbolic":
+            backend_name = f"{self.name}:fallback"
+        return Decision(round(val, 3), backend_name, _now_ms(start))
 
 
 # ---------------------------------------------------------------------------

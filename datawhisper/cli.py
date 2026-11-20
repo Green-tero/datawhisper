@@ -570,6 +570,106 @@ def audit(
         raise typer.Exit(code=2) from exc
 
 
+@app.command()
+def advise(
+    sql: Annotated[str, typer.Argument(help="SQL query to analyze for index recommendations")],
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source", "-s", help="Database source (.sqlite, .duckdb, .parquet, postgres://)"
+        ),
+    ] = ":memory:",
+) -> None:
+    """Analyze query predicates and recommend optimal, dialect-aware indexes."""
+    config = DataWhisperConfig.from_env()
+    if source == ":memory:":
+        from datawhisper.core.advisor import IndexAdvisor
+
+        advisor = IndexAdvisor(dialect="sqlite")
+        report = advisor.advise(sql)
+    else:
+        engine = _open_engine(source, config)
+        try:
+            report = engine.advise_query(sql)
+        finally:
+            engine.close()
+
+    console.print(Panel(f"[bold cyan]{report.summary}[/bold cyan]", title="Index Advisor"))
+    if report.recommendations:
+        table = RichTable(title="Recommended Indexes")
+        table.add_column("Table", style="cyan")
+        table.add_column("Columns", style="green")
+        table.add_column("Est. Reduction", justify="right", style="magenta")
+        table.add_column("DDL", overflow="fold")
+        for rec in report.recommendations:
+            table.add_row(
+                rec.table,
+                ", ".join(rec.columns),
+                f"{rec.estimated_cost_reduction_pct:.0f}%",
+                rec.sql,
+            )
+        console.print(table)
+
+
+@app.command()
+def contract(
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source", "-s", help="Database source (.sqlite, .duckdb, .parquet, postgres://)"
+        ),
+    ],
+    table: Annotated[
+        str, typer.Option("--table", "-t", help="Target table to audit against data contract")
+    ],
+    not_null: Annotated[
+        list[str] | None, typer.Option("--not-null", help="Columns that must not contain NULL")
+    ] = None,
+    unique: Annotated[
+        list[str] | None, typer.Option("--unique", help="Columns that must be unique")
+    ] = None,
+    min_rows: Annotated[
+        int | None, typer.Option("--min-rows", help="Minimum required row count")
+    ] = None,
+) -> None:
+    """Validate runtime database data against declarative data contracts."""
+    from datawhisper.core.semantic import (
+        ContractRule,
+        ContractRuleType,
+        TableContract,
+        verify_table_contract,
+    )
+
+    config = DataWhisperConfig.from_env()
+    engine = _open_engine(source, config)
+    try:
+        rules: list[ContractRule] = []
+        for col in not_null or []:
+            rules.append(ContractRule(column=col, rule_type=ContractRuleType.NOT_NULL))
+        for col in unique or []:
+            rules.append(ContractRule(column=col, rule_type=ContractRuleType.UNIQUE))
+        if min_rows is not None:
+            rules.append(ContractRule(rule_type=ContractRuleType.ROW_COUNT, min_rows=min_rows))
+
+        c = TableContract(table=table, rules=rules)
+        report = verify_table_contract(engine, c)
+        if report.passed:
+            console.print(
+                f"[bold green]✓ Data contract passed:[/bold green] "
+                f"Checked {report.checked_rules} rule(s) on table '{table}'."
+            )
+        else:
+            console.print(
+                f"[bold red]✗ Data contract failed:[/bold red] "
+                f"Found {len(report.violations)} violation(s) on table '{table}':"
+            )
+            for v in report.violations:
+                console.print(f"  • [red]{v.rule_type}[/red] on column '{v.column}': {v.message}")
+            raise typer.Exit(code=1)
+    finally:
+        engine.close()
+
+
 def main() -> None:
     """Console-script entry point."""
     app()

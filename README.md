@@ -1,14 +1,14 @@
-# DataWhisper v1.4
+# DataWhisper v1.5
 
 DataWhisper answers questions about your data and reviews database changes in pull requests.
 
 It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits and data masking stay in code you can read.
 
-**Current release: 1.4.3.** See [CHANGELOG.md](CHANGELOG.md).
+**Current release: 1.5.4.** See [CHANGELOG.md](CHANGELOG.md).
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Release](https://img.shields.io/badge/release-1.4.3-blue)
+![Release](https://img.shields.io/badge/release-1.5.4-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **Language / زبان:** open a section below. English is open by default.
@@ -193,10 +193,12 @@ datawhisper ask "which country generates the most refund risk?" --db demo.sqlite
 
 | Command | Purpose |
 | --- | --- |
-| `datawhisper ask "<q>" --db <src> [--explain-only]` | Agentic analysis. `--explain-only` prints the pruned context and exits. |
-| `datawhisper inspect --db <src> [--profile t.c] [--graph "<q>"]` | Catalog, column statistics, or schema-pruning preview. |
-| `datawhisper explain "<sql>" --db <src>` | Dry run: AST verdict + normalized plan + cost decision. |
-| `datawhisper dashboard --db <src> [-o out.html] [--sql …] [--question …]` | Standalone dark-mode report. |
+| `datawhisper ask "<q>" --source <src> [--explain-only]` | Agentic analysis. `--explain-only` prints the pruned context and exits. |
+| `datawhisper advise "<sql>" [--source <src>]` | Automated Index Advisor: propose dialect-aware covering indexes. |
+| `datawhisper contract --source <src> --table <tbl> [--not-null col] [--unique col]` | Declarative Data Contract validation in CI/CD. |
+| `datawhisper inspect --source <src> [--profile t.c] [--graph "<q>"]` | Catalog, column statistics, or schema-pruning preview. |
+| `datawhisper explain "<sql>" --source <src>` | Dry run: AST verdict + normalized plan + cost decision. |
+| `datawhisper dashboard --source <src> [-o out.html] [--sql …] [--question …]` | Standalone dark-mode report. |
 | `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | Offline drift + PII + static migration audit. |
 | `datawhisper audit --repo o/r --pr N --base-ref main --head-ref SHA --ci-audit` | Headless PR governance; posts a sticky comment. |
 
@@ -237,12 +239,16 @@ Plan regression signals are deliberately narrow to avoid alert fatigue: an index
 | `DW_AUTO_LIMIT` | `500` | LIMIT injected for oversized scans |
 | `DW_REJECT_CARTESIAN` | `true` | Reject cartesian joins |
 | `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | `allow_with_budget` or `reject` |
-| `DW_PII_ENABLED`, `DW_PII_MODE` | `true`, `hash` | Scrubber switch and mode |
+| `DW_PII_ENABLED`, `DW_PII_MODE` | `true`, `hash` | Scrubber switch and mode (`mask`, `hash`, `pseudonymize`, `differential_privacy`) |
 | `DW_PII_SALT` | local default | HMAC salt; set a secret in CI |
+| `DW_PII_HMAC_SALT` | empty | Session-scoped pseudonymization salt |
+| `DW_PII_DP_EPSILON` | `1.0` | Differential privacy epsilon budget |
 | `DW_PII_ALLOW_COLUMNS` | empty | Comma-separated columns exempt from scrubbing |
 | `DW_GRAPH_MAX_TABLES` | `6` | Tables retained per question |
 | `DW_GRAPH_MAX_COLUMNS` | `12` | Column cap per table in the prompt |
 | `DW_GRAPH_MAX_TOKENS` | `1500` | Prompt budget for schema context |
+| `DW_GRAPH_HYBRID_DENSE` | `true` | Enable hybrid BM25 + dense semantic hash projection |
+| `DW_GRAPH_HYBRID_WEIGHT` | `0.35` | Dense semantic weighting in hybrid retrieval |
 | `DW_DOMAIN_PRUNING` | `true` | Coarse-to-fine domain classification before FK paths |
 | `DW_MAX_DOMAINS` | `3` | Max domain buckets retained |
 

@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
+import random
 import re
 import secrets
 from collections.abc import Iterable, Sequence
@@ -262,12 +264,20 @@ class PrivacyScrubber:
         self._tokens: dict[tuple[PiiCategory, str], str] = {}
         self._counters: dict[PiiCategory, int] = {}
         env_hmac_salt = os.environ.get("DW_PII_HMAC_SALT", "").strip()
+        env_pii_salt = os.environ.get("DW_PII_SALT", "").strip()
         if env_hmac_salt:
             self._session_salt = env_hmac_salt
+        elif env_pii_salt:
+            self._session_salt = env_pii_salt
         elif self.config.salt and self.config.salt != "datawhisper-local-salt":
             self._session_salt = self.config.salt
         else:
-            self._session_salt = os.environ.get("DW_PII_SALT") or _SESSION_SALT_FALLBACK
+            self._session_salt = _SESSION_SALT_FALLBACK
+        self._dp_rng = (
+            random.Random(self.config.dp.seed)
+            if self.config.dp.seed is not None
+            else random.Random()
+        )
         # Optional System-1 classifier: identifiers the exact token map does
         # not know are judged locally by the decision engine. The static map
         # always wins - it is exact and free - so the engine only settles
@@ -298,6 +308,25 @@ class PrivacyScrubber:
         self._classification_cache[name] = verdict
         return verdict
 
+    def _apply_laplace_noise(self, val: float | int) -> float | int:
+        """Calibrated Laplace mechanism for epsilon-differential privacy."""
+        dp = self.config.dp
+        epsilon = max(dp.epsilon, 1e-6)
+        scale = dp.sensitivity / epsilon
+        u = self._dp_rng.uniform(-0.5, 0.5)
+        while u == 0.0:
+            u = self._dp_rng.uniform(-0.5, 0.5)
+        sign = 1.0 if u > 0 else -1.0
+        noise = -scale * sign * math.log(1.0 - 2.0 * abs(u))
+        noisy_val = float(val) + noise
+        if dp.clamp_min is not None:
+            noisy_val = max(noisy_val, dp.clamp_min)
+        if dp.clamp_max is not None:
+            noisy_val = min(noisy_val, dp.clamp_max)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return round(noisy_val)
+        return round(noisy_val, 4)
+
     def scrub(
         self, columns: Sequence[str], rows: Iterable[Sequence[Any]]
     ) -> tuple[list[list[Any]], RedactionReport]:
@@ -317,6 +346,7 @@ class PrivacyScrubber:
         affected_columns: set[str] = set()
         rows_affected = 0
         total = 0
+        dp_noise_injected = 0
 
         for row in rows:
             out_row: list[Any] = []
@@ -337,6 +367,21 @@ class PrivacyScrubber:
                     by_category[category.value] = by_category.get(category.value, 0) + 1
                     affected_columns.add(columns[index])
                     total += 1
+                    row_hit = True
+                    continue
+                if (
+                    self.config.mode == "differential_privacy"
+                    and isinstance(cell, (int, float))
+                    and not isinstance(cell, bool)
+                ):
+                    noisy = self._apply_laplace_noise(cell)
+                    out_row.append(noisy)
+                    by_category["DIFFERENTIAL_PRIVACY"] = (
+                        by_category.get("DIFFERENTIAL_PRIVACY", 0) + 1
+                    )
+                    affected_columns.add(columns[index])
+                    total += 1
+                    dp_noise_injected += 1
                     row_hit = True
                     continue
                 if isinstance(cell, str):
@@ -360,6 +405,10 @@ class PrivacyScrubber:
             columns=sorted(affected_columns),
             rows_affected=rows_affected,
             mode=self.config.mode,
+            dp_noise_injected=dp_noise_injected,
+            dp_epsilon=(
+                self.config.dp.epsilon if self.config.mode == "differential_privacy" else None
+            ),
         )
         return scrubbed, report
 

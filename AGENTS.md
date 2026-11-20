@@ -8,7 +8,7 @@ instead of re-deriving them.
 
 - **Product:** DataWhisper — local-first agentic database copilot and CI/CD
   database governance engine. Public repo: `Green-tero/datawhisper`.
-- **Release line:** 1.4.x (current release 1.4.3). Keep `pyproject.toml`,
+- **Release line:** 1.5.x (current release 1.5.4). Keep `pyproject.toml`,
   `datawhisper/__init__.py`, README badge and CHANGELOG in sync on every bump.
 - **Dual role:** interactive local CLI/dashboard AND an autonomous PR auditor
   GitHub Action. Both share the same core.
@@ -18,10 +18,13 @@ instead of re-deriving them.
 ```
 datawhisper/
   core/
-    decision_engine.py   System-1: heuristic/ONNX/HTTP backends, <40ms decisions
-    schema_graph.py      BM25 retrieval + FK graph + Dijkstra join paths + coarse domains
+    decision_engine.py   System-1: heuristic/ONNX/HTTP backends, <20ms decisions
+    schema_graph.py      Hybrid BM25 + dense semantic retrieval + FK graph + Dijkstra paths
     security.py          three-layer AST sandbox + EXPLAIN cost gate + SemanticFirewall
-    privacy.py           PII detection (email/card/SSN/phone/API key/JWT/IP) + 4 redaction modes
+    privacy.py           PII detection + 5 redaction modes (including differential privacy)
+    semantic.py          Semantic layer (governed metrics) + declarative Data Contracts
+    advisor.py           AST-driven automated Index Advisor & Cost Optimizer
+    synthetic.py         Mock data generator from CatalogSnapshot with referential integrity
     database.py          DatabaseBackend protocol: SQLite/DuckDB/Parquet/JSONL/Postgres
     agent.py             four-stage ReAct loop, zero LangChain; latency telemetry split
     config.py            pydantic policies (safety, cost, privacy, schema_graph, decision)

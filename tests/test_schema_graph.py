@@ -296,3 +296,12 @@ def test_shortest_path_caching(large_catalog: CatalogSnapshot) -> None:
     # Subsequent traversal retrieves the identical cached instance
     plan2 = graph.shortest_path("t5", "t40")
     assert plan2 is plan1
+
+
+def test_hybrid_dense_scoring(large_catalog: CatalogSnapshot) -> None:
+    graph = _graph(large_catalog)
+    dense = graph.dense_score("metric value in t40")
+    assert dense["t40"] > 0.0
+
+    hybrid = graph.hybrid_score("metric value in t40")
+    assert hybrid["t40"] > 0.0

@@ -467,3 +467,38 @@ def test_hmac_session_salt_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     # Stable across instances in the same session
     assert res1[0][0] == res2[0][0]
     assert res1[0][0].startswith("ps_")
+
+
+def test_differential_privacy_laplace_mechanism() -> None:
+    from datawhisper.core.config import DifferentialPrivacyConfig
+
+    dp_cfg = DifferentialPrivacyConfig(epsilon=0.5, sensitivity=1.0, seed=123)
+    scrubber = PrivacyScrubber(PrivacyConfig(mode="differential_privacy", dp=dp_cfg))
+
+    columns = ["dept", "avg_salary", "headcount"]
+    rows = [["Engineering", 150000.0, 42], ["Sales", 90000.0, 18]]
+    scrubbed, report = scrubber.scrub(columns, rows)
+
+    assert report.mode == "differential_privacy"
+    assert report.dp_noise_injected == 4
+    assert report.dp_epsilon == 0.5
+    # Non-numeric string untouched
+    assert scrubbed[0][0] == "Engineering"
+    # Numeric values received calibrated noise
+    assert scrubbed[0][1] != 150000.0
+    assert isinstance(scrubbed[0][2], int)
+
+
+def test_differential_privacy_clamping() -> None:
+    from datawhisper.core.config import DifferentialPrivacyConfig
+
+    dp_cfg = DifferentialPrivacyConfig(
+        epsilon=0.1, sensitivity=10.0, clamp_min=10.0, clamp_max=100.0, seed=42
+    )
+    scrubber = PrivacyScrubber(PrivacyConfig(mode="differential_privacy", dp=dp_cfg))
+
+    scrubbed, report = scrubber.scrub(["metric"], [[50.0], [50.0], [50.0]])
+    for row in scrubbed:
+        val = row[0]
+        assert 10.0 <= val <= 100.0
+    assert report.dp_noise_injected == 3
