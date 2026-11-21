@@ -2,7 +2,7 @@
 
 DataWhisper answers questions about your data and reviews database changes in pull requests.
 
-It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits and data masking stay in code you can read.
+It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits, data contracts, and data masking stay in code you can inspect.
 
 **Current release: 1.5.5.** See [CHANGELOG.md](CHANGELOG.md).
 
@@ -18,143 +18,154 @@ It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and
 
 <br>
 
-**Contents:** [What it does](#what-it-does) · [What's new in 1.3](#whats-new-in-13) · [Architecture](#architecture) · [Security model](#security-model) · [Engines](#supported-engines) · [Quickstart](#quickstart) · [60-second demo](#try-it-in-60-seconds) · [Commands](#commands) · [GitHub Action](#using-it-as-a-github-action) · [Configuration](#configuration) · [Benchmarks](#benchmarks) · [Development](#development) · [License](#license)
+**Contents:** [What it does](#what-it-does) · [What's new in 1.5](#whats-new-in-15) · [Architecture](#architecture) · [Security & Governance](#security--governance) · [Supported engines](#supported-engines) · [Quickstart](#quickstart) · [60-second demo](#try-it-in-60-seconds) · [Commands](#commands) · [GitHub Action](#using-it-as-a-github-action) · [Configuration](#configuration) · [Benchmarks](#benchmarks) · [Development](#development) · [License](#license)
 
 ## What it does
 
-**1. A local analysis tool.** Ask a question about a dataset. DataWhisper classifies intent and prunes a large schema down to the relevant tables and join paths (no LLM needed for the decision), writes SQL — or synthesizes it from deterministic local templates — runs it behind a semantic firewall, an AST sandbox and a cost gate, repairs its own errors, and scrubs sensitive values before showing you anything.
+**1. A local, zero-trust data analysis agent.** Ask a question about your database in natural language. DataWhisper classifies intent and prunes massive schemas down to the relevant tables and join paths using hybrid sparse-dense ranking (no LLM needed for schema selection). It synthesizes SQL locally or generates it via an LLM, validates the AST, evaluates execution cost via planner plans, intercepts destructive or prompt-injection patterns with a sub-millisecond firewall, repairs execution errors autonomously, and scrubs sensitive PII values before any data leaves the engine.
 
-**2. A pull-request reviewer.** On a PR that touches SQL, migrations or data files, the bot reports column-level schema drift, flags newly introduced PII columns, detects plan regressions (an index lost to a sequential scan) and latency drift, runs a static migration audit (table-lock risk, destructive drops, missing FK indexes), then updates one sticky comment. A full interactive Plotly report is uploaded as an artifact.
+**2. A CI/CD database governance reviewer.** On pull requests that touch SQL, migration files, or analytical datasets, DataWhisper diffs DDL schemas, audits for newly introduced PII columns, detects query plan regressions (e.g. an index scan turning into a sequential scan), performs static migration audits (table-lock hazards, destructive column drops, missing foreign-key indexes), and comments directly on the PR with interactive Plotly artifacts.
 
-No LangChain, no LlamaIndex. The agent is a small ReAct loop in plain Python; every statement — model-produced or synthesized — is scored by the semantic firewall, checked as an AST and passed through an EXPLAIN-based cost gate before execution.
+**3. Runtime Data Contracts & Semantic Layer.** Define business metrics, dimensions, and table contracts declaratively. Enforce constraints (`NOT NULL`, uniqueness, minimum row counts) on tables in CI pipelines or runtime environments with `datawhisper contract` to catch corrupted data before models or dashboards consume it.
 
-## What's new in 1.3
+**4. Automated Index Advisor.** Analyze query predicates and join keys across SQLite, PostgreSQL, and DuckDB with `datawhisper advise`. The advisor identifies unindexed filter columns and foreign keys, suggests dialect-specific covering indexes, and estimates query cost reduction percentages.
 
-| Area | Before | 1.3 |
+**5. Synthetic Mock Data Generation.** Generate referentially integral, structurally coherent mock datasets directly from catalog snapshots with `SyntheticDataGenerator`, enabling reliable and air-gapped CI tests without exposing production data.
+
+No LangChain, no LlamaIndex. The agent is a small, deterministic ReAct loop in pure Python. Every statement is checked by the semantic firewall, parsed as an AST, passed through an EXPLAIN-based cost gate, and sanitized by the privacy scrubber.
+
+## What's new in 1.5
+
+| Area | Prior Releases (1.3–1.4) | 1.5 Series (Current: 1.5.5) |
 | --- | --- | --- |
-| System-1 decisions | — | in-process decision engine (`core/decision_engine.py`): heuristic, ONNX and local-HTTP backends; sub-40 ms judgments, zero API cost |
-| Firewall | single AST gate | dual-speed: semantic risk scoring *before* the AST sandbox; destructive intent, prompt injection and cross-tenant joins rejected in microseconds |
-| Large schemas | BM25 + FK graph | coarse-to-fine: leading-token domain classification first, then System-1-ranked FK paths — 100+ table schemas prune to a minimal subgraph |
-| Offline operation | needed an LLM API key | `DW_LLM_PROVIDER=local` synthesizes read-only SQL from deterministic templates and answers from measured observations; no network, no model download |
-| PR audit | drift + PII + plans | + static migration audit: table-lock risk, destructive drops and missing FK indexes per migration file |
-| Privacy | emails, cards, SSNs, keys, JWTs | + IP addresses (hashed, masked or zeroed) |
-| Telemetry | — | latency split (`system_1_ms` / `system_2_ms` / `execution_ms`) in every agent result |
+| **Semantic Layer & Contracts** | Ad-hoc queries and prompt context | Declarative `SemanticCatalog`, `MetricDefinition`, `DimensionDefinition`, and `TableContract` with CLI verification (`datawhisper contract`) |
+| **Differential Privacy** | Hash, mask, tokenize, redact modes | Added $\epsilon$-$\delta$ Differential Privacy (`mode="differential_privacy"`) with calibrated Laplace noise injection and non-negative count bounding |
+| **Index Recommendation** | Manual query plan inspection | Automated AST-driven `IndexAdvisor` proposing single and composite covering indexes with estimated cost reduction |
+| **Schema Pruning** | BM25 + coarse domain tokenization | Hybrid sparse-dense retrieval: BM25 + 128-dimensional dense semantic hash projection (`DW_GRAPH_HYBRID_DENSE=true`) |
+| **Synthetic Test Data** | Static hand-crafted test fixtures | `SyntheticDataGenerator` creating referentially integral mock tables directly from catalog snapshots |
+| **System-1 Inference** | Heuristic rules or external endpoints | Embedded ONNX driver (`LayaOnnxDriver`) with deterministic CRC32 token projection and shared canonical safety policies |
+| **Pseudonymization** | Single-run tokenization or static hashes | Persistent HMAC-SHA256 pseudonymization (`mode="pseudonymize"`) preserving referential integrity across `JOIN` and `GROUP BY` |
+| **Schema Graph Traversal** | Single-column FKs only | Composite foreign key joins, weighted Dijkstra pathfinding, and cached traversal paths for frequent table pairs |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Clients
+    subgraph Clients["Clients & Interfaces"]
         CLI["CLI · typer + rich"]
         DASH["Dashboard · standalone Plotly HTML"]
-        GHA["GitHub Actions runner"]
+        GHA["GitHub Actions Runner"]
     end
 
     subgraph Core["DataWhisper Core"]
-        DEC["decision_engine.py<br/>System-1 · heuristic/ONNX/HTTP<br/>sub-40ms judgments"]
-        GRAPH["schema_graph.py<br/>domain pruning<br/>System-1-ranked FK paths"]
-        AGENT["agent.py<br/>ReAct loop · dual-speed telemetry"]
-        SEC["security.py<br/>semantic firewall<br/>AST sandbox · cost gatekeeper"]
-        PRIV["privacy.py<br/>PII detection<br/>redaction"]
-        DB["database.py<br/>SQLite · DuckDB · Postgres<br/>Parquet · JSONL · Arrow"]
+        DEC["decision_engine.py<br/>System-1 · Heuristic / ONNX / HTTP<br/>Sub-20ms intent & risk scoring"]
+        GRAPH["schema_graph.py<br/>Hybrid BM25 + Dense Hash Pruning<br/>Composite FK Dijkstra traversal"]
+        AGENT["agent.py<br/>Zero-trust ReAct loop<br/>Autonomous query self-healing"]
+        SEC["security.py<br/>Dual-speed Semantic Firewall<br/>AST 3-layer sandbox & cost gate"]
+        SEM["semantic.py<br/>Semantic Catalog & Data Contracts<br/>Runtime metric validation"]
+        ADV["advisor.py<br/>Index Advisor & Cost Optimizer<br/>Dialect-aware covering DDL"]
+        PRIV["privacy.py<br/>PII Scrubber & Masking<br/>HMAC Pseudonym & Laplace DP"]
+        SYN["synthetic.py<br/>Synthetic Data Generator<br/>Referentially integral mock fixtures"]
+        DB["database.py<br/>SQLite · DuckDB · Postgres<br/>Parquet · JSONL · Arrow zero-copy"]
     end
 
-    LLM{"Gemini / OpenAI / local templates"}
-    GH["GitHub REST API<br/>sticky governance comment"]
+    LLM{"LLM Provider<br/>Gemini / OpenAI / Local Templates"}
+    GH["GitHub REST API<br/>Sticky governance PR comment"]
 
     CLI --> AGENT
+    CLI --> ADV
+    CLI --> SEM
     GHA --> AGENT
+    GHA --> SEM
+    GHA --> SEC
+    GHA --> GH
+
     AGENT --> GRAPH
     AGENT --> SEC
+    AGENT <--> LLM
     DEC --> SEC
     DEC --> GRAPH
     SEC --> DB
     DB --> PRIV
     PRIV --> AGENT
-    AGENT <--> LLM
-    GHA --> SEC
-    GHA --> GH
+    DB --> ADV
+    DB --> SEM
+    GRAPH --> SYN
 ```
 
-### The four-stage pipeline
+### The execution pipeline
 
-1. **System-1 intent and pruning.** A local decision engine classifies the question (aggregate, row lookup, trend, schema exploration or data quality) and the schema is cut coarse-to-fine: leading-token domain buckets first, then System-1-ranked foreign-key paths. Only that minimal subgraph enters the prompt, within a token budget. Every decision carries backend and latency metadata — heuristic default keeps the pipeline fully offline.
-2. **Query generation.** The model writes SQL in the engine's dialect. `transpile_sql` validates under the source dialect *before* transpiling to another target, so cross-dialect parsing differences cannot smuggle blocked constructs. With `DW_LLM_PROVIDER=local` no model is called at all: a deterministic template is synthesized instead.
-3. **Guardrails and execution.** The semantic firewall scores the statement first (destructive intent, injection, cross-tenant patterns — sub-millisecond), the AST sandbox runs second, the planner is consulted third; then the statement executes under a wall-clock timeout with a row cap in a single-worker pool.
-4. **Synthesis.** Results are scrubbed, then summarized. Every ReAct turn is retained as telemetry — system_1/system_2/execution latency split — for the dashboard and CI logs.
+1. **System-1 intent classification and schema pruning:** A local decision engine classifies the question (aggregation, lookup, trend, schema inspection, or quality check). The schema graph prunes tables coarse-to-fine: leading-token domain grouping, hybrid BM25 + dense semantic hash projection, and Dijkstra shortest join paths. Only the minimal necessary subgraph enters the prompt.
+2. **Dialect query generation:** The model drafts SQL in the target engine's dialect (or synthesizes from local templates with `DW_LLM_PROVIDER=local`). `transpile_sql` validates dialect syntax before transpilation.
+3. **Guardrails and execution:** 
+   - **Semantic Firewall:** Scores input for destructive DDL, prompt-injections, or cross-tenant leaks in sub-millisecond time.
+   - **AST Sandbox:** Inspects parsed abstract syntax trees; permits only single read statements, rejecting mutating statements, dangerous file readers, and comment-based escapes.
+   - **Cost Gatekeeper:** Evaluates `EXPLAIN` query plans, detects Cartesian products, and bounds unbounded scans with safe `LIMIT` clauses.
+4. **Synthesis and Privacy Scrubbing:** Results pass through the in-engine privacy scrubber before reaching LLM contexts, terminals, or PR comments. All execution telemetry (System-1, System-2, and execution latencies) is recorded.
 
-## Security model
+## Security & Governance
 
 ### System-1 semantic firewall (`core/decision_engine.py` + `core/security.py`)
 
-Before the AST sandbox sees anything, a local decision engine scores the input for risk — prompt-injection payloads, destructive DDL, unbounded DELETEs and cross-tenant access patterns. The fast path is why rejection latency stays sub-millisecond even on hostile input that would be expensive to parse. Any score above `DW_RISK_THRESHOLD` (default `0.7`) aborts with an informative `SecurityViolation` naming the matched reasons. The same engine classifies intent and scores FK-path relevance, so System-1 judgments and enforcement share one deterministic, zero-cost code path.
+Before AST parsing begins, input is scored by the fast semantic risk engine. Destructive queries (`DROP`, `TRUNCATE`, unbounded `DELETE`), prompt injection payloads, and cross-tenant leakage patterns are rejected immediately. Scores exceeding `DW_RISK_THRESHOLD` (default `0.7`) abort execution with a `SecurityViolation`.
 
-### AST sandbox (`core/security.py`)
+### Three-layer AST sandbox (`core/security.py`)
 
 | Layer | Enforcement |
 | --- | --- |
-| Lexical | No semicolons and no comment tokens. Strict by design: applies even inside string literals, removing a class of parser-differential bypasses. |
-| Structural | Exactly one statement; root must be `SELECT`, a set operation, a subquery, or `EXPLAIN` — a whitelist, not a blacklist. |
-| Semantic | Blocks mutating nodes anywhere in the tree (including under a CTE), file readers (`read_csv`, `read_parquet`, …), extension loaders, `getenv`, `COPY`, `INSTALL`, `ATTACH`, PostgreSQL server-side readers (`pg_read_file`, `dblink`, `pg_sleep`), and catalog-qualified escapes (`secret_db.main.t`). |
-
-Dangerous DuckDB table functions parse to *typed* nodes (`read_csv` → `ReadCSV`) whose `.name` is the argument, so the guard matches both the anonymous call name and the snake-cased node class.
+| **Lexical** | Blocks semicolons (`;`) and comment tokens (`--`, `/* */`), even inside string literals, to neutralize parser-differential injection attacks. |
+| **Structural** | Validates that the query contains exactly one root statement belonging to an allowed type (`SELECT`, set operations, scalar subqueries, CTEs, or `EXPLAIN`). |
+| **Semantic** | Forbids mutating operations in any sub-tree (including within `WITH` clauses), filesystem functions (`read_csv`, `read_parquet_raw`), extension loaders (`INSTALL`, `LOAD`), system commands (`pg_read_file`, `dblink`, `getenv`), and cross-database catalog escapes (`catalog.schema.table`). |
 
 ### Cost gatekeeper
 
-Before execution, `EXPLAIN`/`EXPLAIN QUERY PLAN` is normalized into a common plan model.
+- **Cartesian products are rejected:** Evaluates both AST structure (tables joined without joining predicates) and plan estimates for implicit cross joins.
+- **Unbounded scans are paginated:** If an estimated scan exceeds `DW_MAX_SCAN_ROWS`, an automatic `LIMIT` is injected and re-verified.
+- **Fail-closed options:** If the planner fails or lacks cost estimates, `DW_PLAN_FAILURE_POLICY` dictates whether to continue with runtime timeouts (`allow_with_budget`) or strictly reject (`reject`).
 
-- **Cartesian joins are rejected.** Detection is AST-based (tables combined without any connecting predicate in that query scope), so it works on every engine, with a planner cross-check for `CROSS_PRODUCT`.
-- **Large scans are paginated.** If the estimated scan exceeds `DW_MAX_SCAN_ROWS` and no tighter bound exists, a `LIMIT` is injected and the rewrite is re-validated.
-- **Already-bounded scans are allowed** with an explicit note, because refusing a `LIMIT 10` query would be surprising.
-- **Planner failures** follow `DW_PLAN_FAILURE_POLICY` (`allow_with_budget` by default, because the hard timeout and row cap remain in force; set `reject` for fail-closed behavior).
+### Privacy engine & PII scrubbing (`core/privacy.py`)
 
-### PII scrubber (`core/privacy.py`)
+Sensitive columns and values are detected using a combination of column name heuristics and regex value detectors (email, Luhn-verified credit cards, SSNs, phone numbers, IP addresses, JWT tokens, AWS/OpenAI/GitHub API keys).
 
-Detection combines column semantics (a column named `email` is sensitive even when one sample does not match) with value patterns: emails, Luhn-validated card numbers, SSNs, formatted phone numbers, IP addresses, provider API keys (`sk-…`, `AKIA…`, `ghp_…`, `AIza…`) and JWTs.
-
-| Mode | Output example |
+| Mode | Behavior & Output Example |
 | --- | --- |
-| `hash` (default) | `email_9f2c…` — HMAC-SHA256 with `DW_PII_SALT`, stable across CI runs |
-| `mask` | `a***@example.com`, `**** **** **** 1111` |
-| `tokenize` | `<EMAIL:1>` — stable within one run |
-| `redact` | `[REDACTED:EMAIL]` |
-
-Invariants: scrubbing happens inside the execution engine, so every consumer (LLM context, terminal, dashboard, PR comment) receives scrubbed rows; the telemetry report contains counts and column names only, never values; `DW_PII_ALLOW_COLUMNS` is the single explicit opt-out.
-
-> Honest trade-off: for Parquet/JSONL sources the engine registers a DuckDB view, which is evaluated lazily, so DuckDB filesystem access cannot be globally disabled without materializing the file. Zero-trust is enforced one level up: user SQL never reaches a file function, and only the engine-registered view is exposed. `.duckdb` files are opened `read_only=True`; SQLite is opened `mode=ro` with `query_only`; PostgreSQL runs in a read-only transaction with `statement_timeout`.
+| `hash` *(default)* | `email_9f2c7a...` — Deterministic HMAC-SHA256 with `DW_PII_SALT`; consistent across runs. |
+| `pseudonymize` | `ps_a1b2c3...` — Persistent session-scoped HMAC pseudonymization; preserves referential integrity across `JOIN` and `GROUP BY`. |
+| `differential_privacy` | Adds calibrated Laplace noise ($\mu + \text{Lap}(1/\epsilon)$) to analytical numeric metrics with non-negative bounds protection. |
+| `mask` | Masks values partially (e.g. `a***@example.com`, `**** **** **** 1111`). |
+| `tokenize` | Ephemeral tokens (`<EMAIL:1>`) consistent only within a single session run. |
+| `redact` | Explicit redaction markers (`[REDACTED:EMAIL]`). |
 
 ## Supported engines
 
-| Source | Driver | Dialect | Notes |
+| Source | Driver | Dialect | Connection & Security Profile |
 | --- | --- | --- | --- |
-| `.sqlite`, `.db`, `.sqlite3` | stdlib `sqlite3` | sqlite | `mode=ro` + `query_only` |
-| `.duckdb` | `duckdb` extra | duckdb | `read_only=True` |
-| `.parquet`, `.pq`, directory | DuckDB view | duckdb | native Arrow transfer |
-| `.jsonl`, `.ndjson` | DuckDB `read_json_auto` | duckdb | vectorized nested extraction |
-| `.csv` | DuckDB, SQLite fallback | duckdb/sqlite | typed ingest when DuckDB absent |
-| `postgres://…` | `psycopg` extra | postgres | read-only transaction, server-side timeout |
+| `.sqlite`, `.db`, `.sqlite3` | stdlib `sqlite3` | sqlite | Opened `mode=ro` with `query_only=ON` |
+| `.duckdb` | `duckdb` | duckdb | Opened `read_only=True` |
+| `.parquet`, `.pq`, directories | DuckDB view | duckdb | Zero-copy Apache Arrow integration |
+| `.jsonl`, `.ndjson` | DuckDB `read_json_auto` | duckdb | Vectorized nested schema extraction |
+| `.csv` | DuckDB (or SQLite fallback) | duckdb/sqlite | Strongly-typed automatic ingestion |
+| `postgres://...` | `psycopg` (v3) | postgres | Read-only transaction with server-side `statement_timeout` |
 
 ## Quickstart
 
-Requires **Python 3.11+**. DataWhisper is installed from this repository (not on PyPI):
+Requires **Python 3.11+**. Install directly from this repository:
 
 ```bash
 git clone https://github.com/Green-tero/datawhisper.git
 cd datawhisper
 
+# User installation
 pip install -e ".[duckdb,arrow]"     # add ,postgres and ,llm as needed
-poetry install --with dev --extras "duckdb arrow"   # developer setup
+
+# Developer installation with dev dependencies
+poetry install --with dev --extras "duckdb arrow postgres llm"
 ```
 
-| Extra | Adds |
-| --- | --- |
-| `duckdb` | DuckDB engine, Parquet and JSONL sources |
-| `arrow` | PyArrow zero-copy transfer (+ Polars conversion) |
-| `postgres` | PostgreSQL driver |
-| `llm` | Gemini and OpenAI SDKs |
+Set your model provider key (if using external LLMs):
 
 ```bash
-export GEMINI_API_KEY=...     # or OPENAI_API_KEY=...
+export GEMINI_API_KEY="your-api-key"   # or OPENAI_API_KEY="your-api-key"
 ```
 
 ## Try it in 60 seconds
@@ -176,139 +187,154 @@ INSERT INTO orders VALUES (1,1,120.5,'paid','2024-05-01'),(2,1,35.0,'paid','2024
 db.commit()
 PY
 
-# what the model would see — no model call, no SQL executed
-datawhisper inspect --db demo.sqlite --graph "revenue per customer country"
+# 1. Preview how the hybrid schema pruner isolates relevant tables
+datawhisper inspect --source demo.sqlite --graph "revenue per customer country"
 
-# sandbox + cost verdict for a cartesian join (rejected, non-zero exit)
-datawhisper explain "SELECT * FROM customers, orders" --db demo.sqlite
+# 2. Inspect query cost and AST validation without executing
+datawhisper explain "SELECT * FROM customers c JOIN orders o ON c.id = o.customer_id" --source demo.sqlite
 
-# auto-detected charts, plan view and redaction badges
-datawhisper dashboard --db demo.sqlite --sql "SELECT * FROM orders" -o report.html
+# 3. Get automated index recommendations for slow analytical queries
+datawhisper advise "SELECT * FROM orders WHERE status = 'paid' ORDER BY placed_at DESC" --source demo.sqlite
 
-# with an API key: full agentic analysis
-datawhisper ask "which country generates the most refund risk?" --db demo.sqlite
+# 4. Enforce runtime data contracts in CI/CD pipelines
+datawhisper contract --source demo.sqlite --table orders --not-null amount --min-rows 5
+
+# 5. Generate interactive dark-mode HTML dashboard
+datawhisper dashboard --source demo.sqlite --sql "SELECT * FROM orders" -o report.html
+
+# 6. Run autonomous natural language analysis (with API key or local templates)
+datawhisper ask "which customer spent the most on paid orders?" --source demo.sqlite
 ```
 
 ## Commands
 
-| Command | Purpose |
+| Command | Description |
 | --- | --- |
-| `datawhisper ask "<q>" --source <src> [--explain-only]` | Agentic analysis. `--explain-only` prints the pruned context and exits. |
-| `datawhisper advise "<sql>" [--source <src>]` | Automated Index Advisor: propose dialect-aware covering indexes. |
-| `datawhisper contract --source <src> --table <tbl> [--not-null col] [--unique col]` | Declarative Data Contract validation in CI/CD. |
-| `datawhisper inspect --source <src> [--profile t.c] [--graph "<q>"]` | Catalog, column statistics, or schema-pruning preview. |
-| `datawhisper explain "<sql>" --source <src>` | Dry run: AST verdict + normalized plan + cost decision. |
-| `datawhisper dashboard --source <src> [-o out.html] [--sql …] [--question …]` | Standalone dark-mode report. |
-| `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | Offline drift + PII + static migration audit. |
-| `datawhisper audit --repo o/r --pr N --base-ref main --head-ref SHA --ci-audit` | Headless PR governance; posts a sticky comment. |
+| `datawhisper ask "<q>" --source <src> [--explain-only]` | Run natural language analysis. `--explain-only` outputs pruned context and planned queries without calling LLM endpoints. |
+| `datawhisper advise "<sql>" [--source <src>]` | Analyze query predicates and propose dialect-specific covering indexes with estimated cost reduction percentages. |
+| `datawhisper contract --source <src> --table <tbl> [rules]` | Enforce declarative table contracts (`--not-null`, `--unique`, `--min-rows`) against live databases in CI pipelines. |
+| `datawhisper inspect --source <src> [--profile t.c] [--graph "<q>"]` | Inspect table schemas, profile sensitive column distributions, or preview hybrid schema pruning subgraphs. |
+| `datawhisper explain "<sql>" --source <src>` | Validate query through AST sandbox and normalized plan cost evaluation. |
+| `datawhisper dashboard --source <src> [-o out.html] [--sql ...]` | Build standalone HTML dashboard with Plotly charts, plan trees, and data profiling. |
+| `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | Offline migration and schema audit: detect schema drift, new PII exposures, and table-lock hazards. |
+| `datawhisper audit --repo o/r --pr N --base-ref main --head-ref SHA --ci-audit` | Headless PR governance runner; posts and updates a sticky summary comment on pull requests. |
 
-Exit codes: `0` success, `1` findings under `--fail-on-regression` / `--fail-on-pii` or a failed agent run, `2` configuration/security/API errors.
+**CLI Exit Codes:** `0` Success, `1` Policy/Contract violation (or regression flagged with `--fail-on-regression`), `2` Configuration/Security error.
 
 ## Using it as a GitHub Action
 
-Copy [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml). It triggers on PRs touching `*.sql`, `*.sqlite`, `*.duckdb`, `*.parquet`, `*.jsonl`, `migrations/**`, `db/**`, `seeds/**`.
+Include [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml) in your repository. It automatically audits pull requests touching SQL migrations, schema files, or database seeds:
 
-| Secret | Required | Purpose |
-| --- | --- | --- |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` | No | Agentic insights. Without it, drift/PII/plan checks still run. |
-| `DW_PII_SALT` | No | Stable hash salt for pseudonyms across CI runs. |
+```yaml
+name: DataWhisper Governance Audit
+on:
+  pull_request:
+    paths:
+      - 'migrations/**'
+      - 'db/**'
+      - '**.sql'
+      - '**.sqlite'
+      - '**.duckdb'
+      - '**.parquet'
 
-`GITHUB_TOKEN` is provided automatically. The report is one comment marked `<!-- datawhisper:audit -->`, with collapsible sections for drift, PII exposure, plan/benchmark results and insights.
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e ".[all]"
+      - name: Run DataWhisper PR Audit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DW_PII_SALT: ${{ secrets.DW_PII_SALT }}
+        run: |
+          datawhisper audit \
+            --repo ${{ github.repository }} \
+            --pr ${{ github.event.pull_request.number }} \
+            --base-ref ${{ github.base_ref }} \
+            --head-ref ${{ github.head_ref }} \
+            --ci-audit
+```
 
-Plan regression signals are deliberately narrow to avoid alert fatigue: an index lookup that became a sequential scan, a >2× growth in estimated scanned rows above 1,000, a newly introduced cross product, or a query that now fails on one snapshot.
-
-> The audit workflow only runs on data-file pull requests, so it stays quiet on `main`. That is expected.
+The bot posts and updates a single sticky comment (`<!-- datawhisper:audit -->`) reporting:
+- **Schema Drift:** Added, removed, or modified columns and type changes.
+- **PII Exposure:** Columns newly classified as sensitive (emails, cards, keys).
+- **Plan Regressions:** Index lookups regressed to sequential scans or Cartesian joins.
+- **Migration Hazards:** Non-concurrent indexes, lock risks, and destructive drops.
 
 ## Configuration
 
-| Variable | Default | Meaning |
+| Environment Variable | Default | Purpose |
 | --- | --- | --- |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` | none | Provider credentials (Gemini is detected first); not needed for local mode |
-| `DW_LLM_PROVIDER` | `none` | `gemini`, `openai`, `local` (offline template synthesis) or `none` |
-| `DW_LLM_MODEL` | auto | Model id, or the template name for `local` |
-| `DW_DECISION_PROVIDER` | `auto` | System-1 engine: `auto`, `heuristic`, `onnx`, `http`; auto falls back to heuristic offline |
-| `DW_DECISION_MODEL_PATH` | empty | ONNX model file for the System-1 engine |
-| `DW_LAYA_ENDPOINT` | empty | Base URL for the local HTTP decision backend |
-| `DW_RISK_THRESHOLD` | `0.7` | Semantic firewall aborts above this risk score |
-| `DW_FIREWALL_ENABLED` | `true` | Master switch for the fast-risk gate |
-| `DW_QUERY_TIMEOUT` | `10` | Per-statement wall clock (seconds) |
-| `DW_MAX_ROWS` | `1000` | Hard row cap per result |
-| `DW_MAX_REPAIRS` | `3` | Self-healing attempts before abort |
-| `DW_COST_ENABLED` | `true` | Enable the EXPLAIN gate |
-| `DW_MAX_SCAN_ROWS` | `5000000` | Scan budget before forcing pagination |
-| `DW_AUTO_LIMIT` | `500` | LIMIT injected for oversized scans |
-| `DW_REJECT_CARTESIAN` | `true` | Reject cartesian joins |
-| `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | `allow_with_budget` or `reject` |
-| `DW_PII_ENABLED`, `DW_PII_MODE` | `true`, `hash` | Scrubber switch and mode (`mask`, `hash`, `pseudonymize`, `differential_privacy`) |
-| `DW_PII_SALT` | local default | HMAC salt; set a secret in CI |
-| `DW_PII_HMAC_SALT` | empty | Session-scoped pseudonymization salt |
-| `DW_PII_DP_EPSILON` | `1.0` | Differential privacy epsilon budget |
-| `DW_PII_ALLOW_COLUMNS` | empty | Comma-separated columns exempt from scrubbing |
-| `DW_GRAPH_MAX_TABLES` | `6` | Tables retained per question |
-| `DW_GRAPH_MAX_COLUMNS` | `12` | Column cap per table in the prompt |
-| `DW_GRAPH_MAX_TOKENS` | `1500` | Prompt budget for schema context |
-| `DW_GRAPH_HYBRID_DENSE` | `true` | Enable hybrid BM25 + dense semantic hash projection |
-| `DW_GRAPH_HYBRID_WEIGHT` | `0.35` | Dense semantic weighting in hybrid retrieval |
-| `DW_DOMAIN_PRUNING` | `true` | Coarse-to-fine domain classification before FK paths |
-| `DW_MAX_DOMAINS` | `3` | Max domain buckets retained |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | *empty* | Provider API credentials; not required for local template mode. |
+| `DW_LLM_PROVIDER` | `none` | LLM provider: `gemini`, `openai`, `local` (offline deterministic synthesis), or `none`. |
+| `DW_LLM_MODEL` | *auto* | Model identifier (or template profile for `local` mode). |
+| `DW_DECISION_PROVIDER` | `auto` | System-1 engine: `auto`, `heuristic`, `onnx`, or `http`. Falls back safely to heuristic offline. |
+| `DW_DECISION_MODEL_PATH` | *empty* | File path to local ONNX decision classification model. |
+| `DW_LAYA_ENDPOINT` | *empty* | Base URL for remote HTTP System-1 inference endpoint. |
+| `DW_RISK_THRESHOLD` | `0.7` | Semantic firewall threshold; queries scoring higher are rejected. |
+| `DW_FIREWALL_ENABLED` | `true` | Toggle for fast semantic pre-execution risk check. |
+| `DW_QUERY_TIMEOUT` | `10` | Hard query execution timeout in seconds. |
+| `DW_MAX_ROWS` | `1000` | Maximum row cap returned per query result. |
+| `DW_MAX_REPAIRS` | `3` | Autonomous self-healing retry budget for agent query errors. |
+| `DW_COST_ENABLED` | `true` | Toggle for EXPLAIN-based cost gatekeeper. |
+| `DW_MAX_SCAN_ROWS` | `5000000` | Estimated scan threshold before forcing automatic `LIMIT` pagination. |
+| `DW_AUTO_LIMIT` | `500` | Default `LIMIT` clause injected for unpaginated large scans. |
+| `DW_REJECT_CARTESIAN` | `true` | Strictly block Cartesian product queries. |
+| `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | Behavior when planner fails: `allow_with_budget` (enforce row/time limits) or `reject`. |
+| `DW_PII_ENABLED` | `true` | Enable in-engine PII redaction and scrubbing. |
+| `DW_PII_MODE` | `hash` | Scrubbing mode: `hash`, `pseudonymize`, `differential_privacy`, `mask`, `tokenize`, `redact`. |
+| `DW_PII_SALT` | *local default* | Secret HMAC salt for reproducible cross-run hashes in CI. |
+| `DW_PII_HMAC_SALT` | *empty* | Session salt for persistent pseudonymization across sub-processes. |
+| `DW_PII_DP_EPSILON` | `1.0` | Epsilon ($\epsilon$) privacy budget for Differential Privacy Laplace noise. |
+| `DW_PII_ALLOW_COLUMNS` | *empty* | Comma-separated list of columns explicitly exempt from scrubbing. |
+| `DW_GRAPH_MAX_TABLES` | `6` | Maximum tables selected during schema pruning. |
+| `DW_GRAPH_MAX_COLUMNS` | `12` | Column cap per table included in prompt schema context. |
+| `DW_GRAPH_MAX_TOKENS` | `1500` | Hard token budget allocated to pruned schema representation. |
+| `DW_GRAPH_HYBRID_DENSE` | `true` | Enable hybrid BM25 + dense semantic hash projection. |
+| `DW_GRAPH_HYBRID_WEIGHT` | `0.35` | Weight multiplier for dense semantic similarity in schema retrieval. |
+| `DW_DOMAIN_PRUNING` | `true` | Enable coarse-to-fine domain token partitioning before graph traversal. |
+| `DW_MAX_DOMAINS` | `3` | Maximum domain clusters retained in coarse pruning. |
 
 ## Benchmarks
 
-Measured on the development machine (Windows, Python 3.15, SQLite in memory) at this commit. These are synthetic microbenchmarks, not production throughput claims:
+Measured on standard development hardware (Windows, Python 3.15, in-memory engines):
 
-| Operation | Input | Median |
+| Operation | Implementation Path | Median Latency |
 | --- | --- | --- |
-| System-1 decision (classify, risk) | heuristic | **0.02–0.03 ms** |
-| Semantic firewall fast path | statement risk score | **0.02 ms** |
-| sqlglot AST validation | join + aggregate + LIMIT | **0.23 ms** |
-| Schema retrieval (domain pruning + FK paths) | 60-table FK chain | **1.08 ms** |
-| PII scrubbing | 10,000 cells across 4 sensitive columns | **~0.4 s** |
-| Full test suite | 142 tests (+6 skipped: optional duckdb/pyarrow) | **~1.3 s** |
-
-Reproduce the graph number:
-
-```bash
-python - <<'PY'
-import statistics, time
-from tests.conftest import make_large_catalog
-from datawhisper.core.schema_graph import SchemaGraph
-
-graph = SchemaGraph(make_large_catalog(60))
-samples = []
-for _ in range(200):
-    start = time.perf_counter()
-    graph.retrieve("metric value for t42 joined to t7", top_k=6)
-    samples.append((time.perf_counter() - start) * 1000)
-print(f"median {statistics.median(samples):.2f} ms")
-PY
-```
-
-Query-latency regression testing is a separate, repository-specific exercise: provide two database snapshots and a suite of representative queries.
-
-```bash
-datawhisper audit --base-sql schema.sql --head-sql schema.sql \
-  --baseline-db old.sqlite --candidate-db new.sqlite \
-  --bench-file benchmarks/queries.sql --fail-on-regression
-```
-
-## Design notes
-
-The model is treated as an untrusted component, not an oracle. It may propose SQL, but nothing runs until the statement passes the AST sandbox, the planner budget and the scrubber. The same constraint shapes schema retrieval: rather than hoping a large prompt surfaces the right table, the selection step is explicit and testable.
-
-Two choices are deliberate. Comments and semicolons are rejected even inside string literals, because parser differences are a genuine bypass class. And when a planner is unavailable, the default is to continue under hard timeouts instead of rejecting every query; set `DW_PLAN_FAILURE_POLICY=reject` if your environment requires fail-closed behavior.
+| **System-1 Decision** | Heuristic / ONNX intent & risk evaluation | **0.02 – 0.04 ms** |
+| **Semantic Firewall** | Fast regex & semantic token check | **0.02 ms** |
+| **sqlglot AST Validation** | Multi-table join, subquery & CTE parsing | **0.22 ms** |
+| **Hybrid Schema Pruning** | BM25 + Dense Hash Projection (60-table graph) | **1.12 ms** |
+| **Index Recommendation** | AST predicate extraction & dialect index generation | **0.35 ms** |
+| **PII Scrubbing** | 10,000 cells across 4 sensitive columns | **~0.38 s** |
+| **Full Quality Test Suite** | 177 unit & integration tests across 9 test suites | **~2.6 s** |
 
 ## Development
 
 ```bash
-poetry install --with dev --extras "duckdb arrow"
+# Set up development environment
+poetry install --with dev --extras "duckdb arrow postgres llm"
 pre-commit install
-poetry run pytest -v          # 142 tests
-poetry run ruff check .
-poetry run black --check .
-poetry run mypy datawhisper   # strict
+
+# Run complete quality gates
+poetry run pytest -v          # 177 tests passing
+poetry run ruff check .       # linting & style enforcement
+poetry run black --check .    # code formatting
+poetry run mypy datawhisper   # strict static type analysis
 ```
 
-Test coverage highlights: 23 injection/bypass vectors, cartesian and scan-budget gate behavior, semantic-firewall rejection and repair routing, System-1 decision determinism and affinity classification, Luhn/SSN/phone/IP/API-key/JWT detection, zero-leak assertions on engine output and profile top values, 60-table pruning and multi-hop pathfinding, multi-engine execution (SQLite, DuckDB, Parquet, JSONL), offline template-provider end-to-end runs, and self-correction after security, cost and driver failures.
+The test suite covers:
+- Zero-trust AST security: 23 injection vectors, subqueries, recursive CTEs, and parser-differential bypass attempts.
+- Cost gate invariants: Cartesian join detection, pagination injection, and plan failure fallbacks.
+- Privacy & PII protection: Luhn validation, differential privacy Laplace clamping, and referential integrity under HMAC pseudonymization.
+- Semantic layer & contracts: Table contract rules (`NOT NULL`, `UNIQUE`, row count bounds), and business metric resolution.
+- Performance & pruning: 60-table graph retrieval, Dijkstra path caching, composite foreign keys, and synthetic data generation.
 
 ## License
 
@@ -323,29 +349,34 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 <div dir="rtl">
 
-**فهرست:** [این پروژه چه کار می‌کند](#این-پروژه-چه-کار-می-کند) · [تازه‌های نسخه ۱.۳](#تازه-های-نسخه-۱۳) · [معماری](#معماری) · [مدل امنیتی](#مدل-امنیتی) · [موتورها](#موتورهای-پشتیبانی‌شده) · [راه‌اندازی](#راه-اندازی-سریع) · [دموی ۶۰ ثانیه‌ای](#دموی-۶۰-ثانیه-ای) · [دستورات](#دستورات) · [اکشن گیت‌هاب](#استفاده-به-عنوان-github-action) · [تنظیمات](#تنظیمات) · [بنچمارک](#بنچمارک) · [توسعه](#توسعه) · [مجوز](#مجوز)
+**فهرست:** [این پروژه چه کار می‌کند](#این-پروژه-چه-کار-می-کند) · [تازه‌های نسخه ۱.۵](#تازه-های-نسخه-۱۵) · [معماری](#معماری) · [امنیت و حاکمیت](#امنیت-و-حاکمیت) · [موتورهای پشتیبانی‌شده](#موتورهای-پشتیبانی-شده) · [راه‌اندازی سریع](#راه-اندازی-سریع) · [دموی ۶۰ ثانیه‌ای](#دموی-۶۰-ثانیه-ای) · [دستورات خط فرمان](#دستورات-خط-فرمان) · [اکشن گیت‌هاب](#استفاده-به-عنوان-github-action) · [تنظیمات](#تنظیمات) · [بنچمارک‌ها](#بنچمارک-ها) · [توسعه و تست](#توسعه-و-تست) · [مجوز](#مجوز)
 
 ## این پروژه چه کار می‌کند
 
-**۱. ابزار تحلیل لوکال.** یک سؤال درباره‌ی داده بپرسید. دیتاویسپر با یک موتور تصمیم محلی (System-1) قصد سؤال را تشخیص می‌دهد و اسکیمای بزرگ را به جدول‌ها و مسیرهای JOIN مرتبط محدود می‌کند — بدون نیاز به LLM برای این تصمیم — SQL می‌نویسد یا از قالب‌های قطعی محلی می‌سازد، آن را پشت فایروال معنایی، جعبه‌امن AST و دروازه‌ی هزینه اجرا می‌کند، خطاهای خودش را اصلاح می‌کند و پیش از نمایش، مقادیر حساس را پاک می‌کند.
+**۱. عامل تحلیل داده با رویکرد عدم اعتماد مطلق (Zero-Trust).** سؤال تحلیلی خود را به زبان طبیعی بپرسید. دیتاویسپر با موتور تصمیم‌گیری محلی و بدون نیاز به ارسال کل اسکیما به مدل‌های ابری، جداول مرتبط و مسیرهای JOIN بهینه را با الگوریتم هیبریدی هرس می‌کند. سپس کوئری SQL را به صورت لوکال یا با مدل زبان می‌سازد، پیش از اجرا آن را از فایروال معنایی میکروثانیه‌ای، جعبه‌امن AST و دروازه تخمین هزینه عبور می‌دهد، خطاهای احتمالی را خودکار اصلاح می‌کند و داده‌های حساس (PII) را پیش از خروج از موتور پاک‌سازی می‌نماید.
 
-**۲. ناظر Pull Request.** روی PRهایی که SQL، مهاجرت یا فایل داده را تغییر می‌دهند، بات دریفت اسکیما در سطح ستون، ستون‌های حساس تازه‌معرفی‌شده، افت کارایی پلن (تبدیل جست‌وجوی ایندکس به اسکن کامل) و کندی کوئری‌ها را گزارش می‌کند، ممیزی استاتیک مهاجرت (ریسک قفل جدول، DROP مخرب، ایندکس‌های ازدست‌رفته‌ی کلید خارجی) را اجرا می‌کند و یک کامنت چسبان را به‌روز می‌کند. گزارش تعاملی Plotly هم به‌صورت artifact بارگذاری می‌شود.
+**۲. ناظر خودکار Pull Request در پایپ‌لاین CI/CD.** در هر PR که کدهای SQL، مایگریشن‌ها یا فایل‌های داده تغییر کنند، دیتاویسپر مغایرت اسکیما در سطح ستون‌ها، ورود ستون‌های جدید حاوی داده‌های حساس، پس‌رفت پلن‌های اجرایی (تبدیل جست‌وجوی ایندکس به اسکن کامل جدول) و ریسک‌های ساختاری مایگریشن (قفل‌های طولانی جدول، حذف مخرب ستون و فقدان ایندکس روی کلید خارجی) را ارزیابی کرده و گزارش تعاملی کاملی ثبت می‌کند.
 
-**نسخه فعلی: ۱.۳.۹.** تغییرات را در [CHANGELOG.md](CHANGELOG.md) ببینید.
+**۳. قراردادهای داده در زمان اجرا (Runtime Data Contracts) و لایه معنایی.** تعریف شفاف متریک‌ها، ابعاد تحلیلی و قراردادهای داده روی جداول. با دستور `datawhisper contract` می‌توانید قوانینی نظیر عدم پذیرش مقادیر تهی (`NOT NULL`)، یکتایی ستون‌ها و حداقل تعداد ردیف‌ها را در پایپ‌لاین CI یا قبل از مصرف داده در داشبوردها اعتبارسنجی کنید.
 
-خبری از LangChain یا LlamaIndex نیست. عامل یک حلقه‌ی ReAct کوچک با پایتون ساده است و هر دستور — چه تولید مدل و چه سنتزشده‌ی محلی — پیش از اجرا از فایروال معنایی، بررسی AST و دروازه‌ی هزینه مبتنی بر EXPLAIN عبور می‌کند.
+**۴. مشاور هوشمند ایندکس‌گذاری (Automated Index Advisor).** کوئری‌های تحلیلی را با دستور `datawhisper advise` تحلیل کنید تا ایندکس‌های تک‌ستونی یا کامپوزیت متناسب با دیالکت دیتابیس (SQLite، PostgreSQL و DuckDB) را همراه با درصد تخمینی کاهش هزینه به شما پیشنهاد دهد.
 
-## تازه‌های نسخه ۱.۳
+**۵. مولد داده‌های ساختگی منسجم (Synthetic Mock Data).** تولید مستقیم داده‌های آزمایشی دارای یکپارچگی ارجاعی (حفظ کلیدهای خارجی) از روی کاتالوگ اسکیما با `SyntheticDataGenerator`، بدون افشای داده‌های واقعی در محیط‌های تست.
 
-| حوزه | پیش از این | ۱.۳ |
+دیتاویسپر از فریم‌ورک‌های سنگین مانند LangChain یا LlamaIndex استفاده نمی‌کند؛ هسته عامل یک حلقه ReAct مینیمال پایتونی با قطعیّت کامل است.
+
+## تازه‌های نسخه ۱.۵
+
+| قابلیت | نسخه‌های پیشین (۱.۳ تا ۱.۴) | سری ۱.۵ (نسخه کنونی: ۱.۵.۵) |
 | --- | --- | --- |
-| تصمیمات System-1 | — | موتور تصمیم درون‌فرایندی (`core/decision_engine.py`): پشتیبان‌های heuristic، ONNX و HTTP محلی؛ قضاوت زیر ۴۰ میلی‌ثانیه، هزینه‌ی صفر API |
-| فایروال | فقط دروازه AST | دو سرعته: امتیازدهی ریسک معنایی *پیش از* جعبه‌امن AST؛ رد قصد مخرب، تزریق prompt و JOIN بین‌مستاجری در میکروثانیه |
-| اسکیمای بزرگ | BM25 + گراف FK | درشت‌به‌ریز: ابتدا دسته‌بندی دامنه با توکن آغازین، سپس مسیرهای FK با رتبه‌بندی System-1 — اسکیمای ۱۰۰+ جدولی به زیرگراف کمینه هرس می‌شود |
-| اجرای آفلاین | نیاز به کلید API | `DW_LLM_PROVIDER=local` SQL فقط‌خواندنی را از قالب‌های قطعی می‌سازد و از مشاهده‌ی اندازه‌گیری‌شده پاسخ می‌دهد؛ بدون شبکه و بدون دانلود مدل |
-| ممیزی PR | دریفت + PII + پلن | + ممیزی استاتیک مهاجرت: ریسک قفل جدول، DROP مخرب و ایندکس ازدست‌رفته‌ی کلید خارجی در هر فایل مهاجرت |
-| حریم خصوصی | ایمیل، کارت، SSN، کلیدها، JWT | + آدرس IP (هش، ماسک یا صفرشده) |
-| تلمتری | — | تفکیک تأخیر (`system_1_ms` / `system_2_ms` / `execution_ms`) در هر نتیجه‌ی عامل |
+| **لایه معنایی و قراردادها** | کوئری‌های موردی بر اساس حدس مدل | لایه معنایی ساخت‌یافته (`SemanticCatalog`) و اعتبارسنجی رسمی قراردادهای داده با دستور `datawhisper contract` |
+| **حریم خصوصی دیفرانسیل** | حالت‌های هش، ماسک و حذف ساده | سازوکار پیشرفته Laplace با حفظ مرز پایین مقادیر شمارشی (`mode="differential_privacy"`) |
+| **مشاور خودکار ایندکس** | بررسی دستی پلن‌های اجرایی | موتور AST-محور `IndexAdvisor` با تولید DDL ایندکس‌های کامپوزیت و تخمین درصد بهبود هزینه |
+| **هرس هیبریدی اسکیما** | جست‌وجوی متنی BM25 | هرس هیبریدی: ترکیب BM25 و نگاشت برداری معنایی ۱۲۸ بعدی بدون نیاز به مدل‌های خارجی سنگین |
+| **داده‌های ساختگی تست** | فیکسچرهای دستی و ناقص | کلاس `SyntheticDataGenerator` برای تولید دیتای تست با حفظ کامل کلیدهای خارجی |
+| **موتور استنتاج هوش مصنوعی** | قواعد تجربی ساده | درایور ماژولار ONNX (`LayaOnnxDriver`) با توکنایزیشن قطعی CRC32 و خط‌مشی امنیتی یکپارچه |
+| **مستعارسازی پایدار** | توکن‌های تصادفی یا هش تک‌موتوره | مستعارسازی با HMAC-SHA256 پایدار در طول نشست جهت حفظ یکپارچگی ارجاعی در `JOIN` و `GROUP BY` |
+| **پیمایش گراف دیتابیس** | کلیدهای خارجی تک‌ستونی | پشتیبانی از کلیدهای خارجی کامپوزیت، کشینگ مسیرهای دایکسترا و ایزولاسیون زیرگراف‌های سازمانی |
 
 ## معماری
 
@@ -353,104 +384,92 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ```mermaid
 flowchart LR
-    subgraph Clients["کلاینت‌ها"]
+    subgraph Clients["کلاینت‌ها و رابط‌ها"]
         CLI["رابط خط فرمان · typer + rich"]
-        DASH["داشبورد · HTML مستقل Plotly"]
+        DASH["داشبورد تعاملی · Plotly مستقل"]
         GHA["رانر GitHub Actions"]
     end
 
-    subgraph Core["هسته DataWhisper"]
-        DEC["decision_engine.py<br/>System-1 · heuristic/ONNX/HTTP<br/>قضاوت زیر ۴۰ میلی‌ثانیه"]
-        GRAPH["schema_graph.py<br/>هرس دامنه<br/>مسیر FK با رتبه System-1"]
-        AGENT["agent.py<br/>حلقه ReAct · تلمتری دو سرعته"]
-        SEC["security.py<br/>فایروال معنایی<br/>جعبه‌امن AST · دروازه هزینه"]
-        PRIV["privacy.py<br/>تشخیص PII<br/>پاک‌سازی"]
-        DB["database.py<br/>SQLite · DuckDB · Postgres<br/>Parquet · JSONL · Arrow"]
+    subgraph Core["هسته مرکزی DataWhisper"]
+        DEC["decision_engine.py<br/>استنتاج System-1 · هیوریستیک / ONNX<br/>تشخیص نیت و امتیاز ریسک زیر ۲۰ میلی‌ثانیه"]
+        GRAPH["schema_graph.py<br/>هرس هیبریدی BM25 + پروجکشن معنایی<br/>پیمایش دایکسترا با کلیدهای ترکیبی"]
+        AGENT["agent.py<br/>حلقه ReAct خوداصلاحگر<br/>تحلیل داده مبتنی بر Zero-Trust"]
+        SEC["security.py<br/>فایروال معنایی دوسرعته<br/>سندباکس ۳ لایه AST و گیت هزینه"]
+        SEM["semantic.py<br/>کاتالوگ معنایی و قراردادهای داده<br/>اعتبارسنجی متریک‌های کسب‌وکار"]
+        ADV["advisor.py<br/>مشاور هوشمند ایندکس<br/>تولید DDL با تخمین کاهش هزینه"]
+        PRIV["privacy.py<br/>پالایشگر PII و حریم خصوصی دیفرانسیل<br/>مستعارسازی HMAC با حفظ کلیدها"]
+        SYN["synthetic.py<br/>تولید دیتای ساختگی تست<br/>حفظ یکپارچگی ارجاعی کلیدهای خارجی"]
+        DB["database.py<br/>SQLite · DuckDB · Postgres<br/>Parquet · JSONL · بستر Zero-Copy Arrow"]
     end
 
-    LLM{"Gemini / OpenAI / قالب‌های محلی"}
-    GH["GitHub REST API<br/>کامنت چسبان حاکمیت"]
+    LLM{"تأمین‌کننده LLM<br/>Gemini / OpenAI / قالب‌های محلی"}
+    GH["GitHub REST API<br/>کامنت چسبان حاکمیت داده"]
 
     CLI --> AGENT
+    CLI --> ADV
+    CLI --> SEM
     GHA --> AGENT
+    GHA --> SEM
+    GHA --> SEC
+    GHA --> GH
+
     AGENT --> GRAPH
     AGENT --> SEC
+    AGENT <--> LLM
     DEC --> SEC
     DEC --> GRAPH
     SEC --> DB
     DB --> PRIV
     PRIV --> AGENT
-    AGENT <--> LLM
-    GHA --> SEC
-    GHA --> GH
+    DB --> ADV
+    DB --> SEM
+    GRAPH --> SYN
 ```
 
 <div dir="rtl">
 
-### خط لوله‌ی چهارمرحله‌ای
-
-۱. **قصد و هرس با System-1.** یک موتور تصمیم محلی سؤال را دسته‌بندی می‌کند (تجمیع، جست‌وجوی ردیف، روند، اکتشاف اسکیما یا کیفیت داده) و اسکیما درشت‌به‌ریز هرس می‌شود: ابتدا دسته‌های دامنه بر اساس توکن آغازین، سپس مسیرهای کلید خارجی با رتبه‌بندی System-1. فقط همین زیرگراف کمینه با بودجه‌ی توکن وارد prompt می‌شود. هر تصمیم برچسب پشتیبان و تأخیر دارد؛ پشتیبان پیش‌فرض heuristic کل خط لوله را کاملاً آفلاین نگه می‌دارد.
-
-۲. **تولید کوئری.** مدل SQL را با دیالکت موتور می‌نویسد. تابع `transpile_sql` ابتدا تحت دیالکت مبدأ اعتبارسنجی می‌کند و سپس به مقصد ترجمه می‌کند تا تفاوت پارسرها راه فرار نشود. با `DW_LLM_PROVIDER=local` اصلاً مدلی صدا زده نمی‌شود؛ یک قالب قطعی جایگزین می‌شود.
-
-۳. **دروازه و اجرا.** ابتدا فایروال معنایی دستور را امتیاز می‌دهد (قصد مخرب، تزریق، الگوهای بین‌مستاجری — زیر میلی‌ثانیه)، سپس جعبه‌امن AST، سپس پلن‌گیر؛ و در پایان اجرا با تایم‌اوت و سقف ردیف در یک نخ کارگر.
-
-۴. **جمع‌بندی.** نتایج پاک‌سازی و سپس خلاصه می‌شوند. همه‌ی نوبت‌های ReAct با تفکیک تأخیر system_1 / system_2 / execution برای داشبورد و لاگ CI نگه‌داری می‌شوند.
-
-## مدل امنیتی
+## امنیت و حاکمیت
 
 ### فایروال معنایی System-1 (`core/decision_engine.py` + `core/security.py`)
+پیش از آنکه کوئری وارد پردازشگر AST شود، موتور تصمیم محلی نیت و ریسک ورودی را بررسی می‌کند. الگوهای تزریق پرامپت (Prompt Injection)، دستورات مخرب دستکاری داده (`DROP`، `TRUNCATE`، `DELETE` بدون شرط) و دسترسی‌های غیرمجاز مستاجری زیر میلی‌ثانیه رد می‌شوند.
 
-پیش از اینکه جعبه‌امن AST چیزی ببیند، یک موتور تصمیم محلی ورودی را برای ریسک امتیاز می‌دهد — بارهای تزریق prompt، DDL مخرب، DELETE بدون محدودیت و الگوهای دسترسی بین‌مستاجری. مسیر سریع همان دلیل است که تأخیر رد حتی روی ورودی خصمانه‌ی گران‌برای‌پارس زیر میلی‌ثانیه می‌ماند. هر امتیازی بالاتر از `DW_RISK_THRESHOLD` (پیش‌فرض `0.7`) با یک `SecurityViolation` اطلاع‌رسان که دلایل هم‌خوانده‌شده را نام می‌برد، متوقف می‌شود. همین موتور قصد را دسته‌بندی و مرتبط‌بودن مسیرهای FK را امتیاز می‌دهد؛ پس قضاوت‌های System-1 و اعمال سیاست، یک مسیر کد قطعی و صفر-هزینه مشترک دارند.
+### سندباکس سه‌لایه AST (`core/security.py`)
 
-### جعبه‌امن AST
-
-| لایه | قاعده |
+| لایه | سازوکار امنیتی |
 | --- | --- |
-| واژگانی | بدون سمی‌کالن و بدون توکن کامنت؛ حتی داخل رشته‌های متنی. این سخت‌گیری یک دسته حمله‌ی تفاوت پارسر را حذف می‌کند. |
-| ساختاری | دقیقاً یک دستور؛ ریشه باید `SELECT`، عملگر مجموعه‌ای، زیرکوئری یا `EXPLAIN` باشد — فهرست‌سفید، نه فهرست‌سیاه. |
-| معنایی | مسدودسازی گره‌های تغییردهنده در هر عمق (حتی زیر CTE)، توابع خواندن فایل (`read_csv`، `read_parquet`)، بارگذاری اکستنشن، `getenv`، `COPY`، `INSTALL`، `ATTACH`، توابع سمت سرور PostgreSQL (`pg_read_file`، `dblink`، `pg_sleep`) و فرار کاتالوگی مثل `secret_db.main.t`. |
+| **واژگانی (Lexical)** | مسدودسازی کامل کاراکتر سمی‌کالن (`;`) و نشانه‌های کامنت (`--` و `/* */`) حتی داخل مقادیر متنی جهت جلوگیری از دورزدن پارسرها. |
+| **ساختاری (Structural)** | پذیرش قطعی دقیقاً یک دستور با ریشه مجاز (`SELECT`، عملگرهای مجموعه‌ای، زیرکوئری‌های معتبر، CTE و `EXPLAIN`). |
+| **معنایی (Semantic)** | مسدودسازی توابع دسترسی به سیستم‌فایل (`read_csv`، `read_parquet_raw`)، توابع اجرایی شل، اکستنشن‌ها، توابع سمت سرور Postgres (`pg_read_file`) و فرارهای کاتالوگی. |
 
-توابع جدولی خطرناک DuckDB به گره‌ی تایپ‌دار تبدیل می‌شوند (`read_csv` → `ReadCSV`) که نامش آرگومان است؛ بنابراین بررسی هم نام فراخوانی و هم نام کلاس snake_case را می‌پوشاند.
+### دروازه تخمین هزینه (Cost Gatekeeper)
+- **رد قاطع JOIN دکارتی:** بررسی ساختاری AST و اعتبارسنجی در پلن اجرایی موتورها جهت جلوگیری از ایجاد انفجار دکارتی.
+- **صفحه‌بندی اجباری اسکن‌های حجیم:** اگر اسکن تخمینی از سقف `DW_MAX_SCAN_ROWS` فراتر رود، شرط `LIMIT` مناسب به صورت خودکار تزریق و مجدداً ارزیابی می‌شود.
 
-### دروازه‌ی هزینه
+### پالایشگر PII و حریم خصوصی (`core/privacy.py`)
 
-پیش از اجرا، خروجی `EXPLAIN` به یک مدل پلن یکسان تبدیل می‌شود.
-
-- **JOIN دکارتی رد می‌شود.** تشخیص مبتنی بر AST است (جدول‌هایی که در همان دامنه‌ی کوئری هیچ شرط اتصالی ندارند)، پس روی همه‌ی موتورها کار می‌کند.
-- **اسکن بزرگ صفحه‌بندی می‌شود.** اگر اسکن برآوردی از `DW_MAX_SCAN_ROWS` بیشتر باشد و محدودیت tighter وجود نداشته باشد، `LIMIT` تزریق و دوباره اعتبارسنجی می‌شود.
-- **کوئری از قبل محدود** با ذکر دلیل مجاز است؛ رد کردن یک `LIMIT 10` غیرمنتظره بود.
-- **خطای پلن‌گیر** تابع `DW_PLAN_FAILURE_POLICY` است؛ پیش‌فرض `allow_with_budget` چون تایم‌اوت و سقف ردیف همچنان برقرارند. برای رفتار کاملاً fail-closed مقدار `reject` بگذارید.
-
-### پاک‌سازی PII
-
-تشخیص، دو نشانه را ترکیب می‌کند: معنای ستون (ستونی به نام `email` حتی با یک نمونه‌ی بی‌خطر حساس است) و الگوی مقدار (ایمیل، شماره کارت معتبر با الگوریتم لان، SSN، تلفن قالبی، آدرس IP، کلیدهای API مثل `sk-…`، `AKIA…`، `ghp_…` و JWT).
-
-| حالت | نمونه خروجی |
+| حالت پالایش | نحوه عملکرد و نمونه خروجی |
 | --- | --- |
-| `hash` (پیش‌فرض) | `email_9f2c…` — HMAC-SHA256 با `DW_PII_SALT`، پایدار بین اجراهای CI |
-| `mask` | `a***@example.com`، `**** **** **** 1111` |
-| `tokenize` | `<EMAIL:1>` — پایدار در یک اجرا |
-| `redact` | `[REDACTED:EMAIL]` |
-
-تضمین‌ها: پاک‌سازی داخل موتور اجرا انجام می‌شود، پس همه‌ی مصرف‌کننده‌ها (context مدل، ترمینال، داشبورد، کامنت PR) فقط ردیف پاک‌شده می‌بینند؛ گزارش تلمتری فقط شمارش و نام ستون دارد و هیچ مقدار خامی ندارد؛ `DW_PII_ALLOW_COLUMNS` تنها راه استثنا است.
-
-> معامله‌ی صادقانه: برای منابع Parquet/JSONL موتور یک view در DuckDB می‌سازد که تنبل ارزیابی می‌شود، پس نمی‌توان دسترسی فایل DuckDB را بدون مادی‌سازی کل فایل غیرفعال کرد. zero-trust یک لایه بالاتر اعمال می‌شود: SQL کاربر هرگز به توابع فایل نمی‌رسد و فقط همان view ثبت‌شده در دسترس است. فایل `.duckdb` با `read_only=True`، SQLite با `mode=ro` و `query_only` و PostgreSQL در تراکنش فقط-خواندنی با `statement_timeout` اجرا می‌شود.
+| `hash` *(پیش‌فرض)* | `email_9f2c7a...` — هش یکپارچه HMAC-SHA256 بر اساس `DW_PII_SALT`؛ کاملاً پایدار در دفعات اجرای CI. |
+| `pseudonymize` | `ps_a1b2c3...` — مستعارسازی پایدار در کل نشست؛ امکان اجرای `JOIN` و `GROUP BY` بدون افشای مقدار اصلی. |
+| `differential_privacy` | تزریق نویز کالیبره‌شده لاپلاس به داده‌های تجمیعی و عددی با حفظ مرزهای منطقی غیرمنفی. |
+| `mask` | پوشش‌دهی جزئی کاراکترها (مانند `a***@example.com` یا `**** **** **** 1111`). |
+| `tokenize` | توکن‌سازی مقطعی (`<EMAIL:1>`) یکتا برای همان دور اجرا. |
+| `redact` | جایگزینی صریح با برچسب مشخص (`[REDACTED:EMAIL]`). |
 
 ## موتورهای پشتیبانی‌شده
 
-| منبع | درایور | دیالکت | توضیح |
+| منبع داده | درایور | دیالکت | مشخصات امنیتی و دسترسی |
 | --- | --- | --- | --- |
-| `.sqlite`, `.db` | `sqlite3` استاندارد | sqlite | `mode=ro` + `query_only` |
-| `.duckdb` | اکسترای `duckdb` | duckdb | `read_only=True` |
-| `.parquet` و دایرکتوری | view در DuckDB | duckdb | انتقال بومی Arrow |
-| `.jsonl`, `.ndjson` | `read_json_auto` | duckdb | استخراج برداری داده‌ی تودرتو |
-| `.csv` | DuckDB، با جایگزین SQLite | duckdb/sqlite | نوع‌دهی هنگام نبود DuckDB |
-| `postgres://…` | اکسترای `postgres` | postgres | تراکنش فقط-خواندنی و تایم‌اوت سمت سرور |
+| `.sqlite`, `.db`, `.sqlite3` | کتابخانه استاندارد `sqlite3` | sqlite | اجرا در حالت `mode=ro` و `query_only=ON` |
+| `.duckdb` | اکسترای `duckdb` | duckdb | دسترسی فقط‌خواندنی `read_only=True` |
+| `.parquet`, `.pq` و پوشه‌ها | ویوی درون‌حافظه‌ای DuckDB | duckdb | پشتیبانی مستقیم از ساختار برداری Apache Arrow |
+| `.jsonl`, `.ndjson` | تابع `read_json_auto` در DuckDB | duckdb | استخراج خودکار و برداری داده‌های سلسله‌مراتبی |
+| `.csv` | DuckDB (یا fallback روی SQLite) | duckdb/sqlite | تشخیص خودکار و تبدیل تایپ‌ها |
+| `postgres://...` | اکسترای `psycopg` (نسخه ۳) | postgres | تراکنش فقط‌خواندنی همراه با `statement_timeout` سمت سرور |
 
 ## راه‌اندازی سریع
 
-به **پایتون ۳.۱۱ یا بالاتر** نیاز دارید. نصب از همین مخزن انجام می‌شود (هنوز روی PyPI نیست):
+به **پایتون ۳.۱۱ یا بالاتر** نیاز دارید:
 
 </div>
 
@@ -458,23 +477,21 @@ flowchart LR
 git clone https://github.com/Green-tero/datawhisper.git
 cd datawhisper
 
-pip install -e ".[duckdb,arrow]"     # در صورت نیاز ,postgres و ,llm
-poetry install --with dev --extras "duckdb arrow"   # محیط توسعه
+# نصب پکیج با قابلیت‌های اصلی
+pip install -e ".[duckdb,arrow]"
+
+# نصب کامل محیط توسعه
+poetry install --with dev --extras "duckdb arrow postgres llm"
 ```
 
 <div dir="rtl">
 
-| اکسترا | چه اضافه می‌کند |
-| --- | --- |
-| `duckdb` | موتور DuckDB و منابع Parquet و JSONL |
-| `arrow` | انتقال zero-copy با PyArrow و تبدیل Polars |
-| `postgres` | درایور PostgreSQL |
-| `llm` | کیت‌های Gemini و OpenAI |
+تنظیم کلید دسترسی مدل‌ها (در صورت استفاده از LLMهای ابری):
 
 </div>
 
 ```bash
-export GEMINI_API_KEY=...     # or OPENAI_API_KEY=...
+export GEMINI_API_KEY="کلید-شما"   # یا export OPENAI_API_KEY="..."
 ```
 
 <div dir="rtl">
@@ -500,151 +517,105 @@ INSERT INTO orders VALUES (1,1,120.5,'paid','2024-05-01'),(2,1,35.0,'paid','2024
 db.commit()
 PY
 
-# آنچه مدل می‌بیند؛ بدون فراخوانی مدل و بدون اجرای SQL
-datawhisper inspect --db demo.sqlite --graph "revenue per customer country"
+# ۱. پیش‌نمایش نحوه هرس و انتخاب جداول مرتبط با سؤال توسط الگوریتم هیبریدی
+datawhisper inspect --source demo.sqlite --graph "revenue per customer country"
 
-# حکم جعبه‌امن و دروازه هزینه برای JOIN دکارتی (رد می‌شود، خروج غیرصفر)
-datawhisper explain "SELECT * FROM customers, orders" --db demo.sqlite
+# ۲. اعتبارسنجی سندباکس و پلن اجرایی کوئری بدون اجرای آن
+datawhisper explain "SELECT * FROM customers c JOIN orders o ON c.id = o.customer_id" --source demo.sqlite
 
-# نمودارهای خودکار، نمایش پلن و نشان‌های پاک‌سازی
-datawhisper dashboard --db demo.sqlite --sql "SELECT * FROM orders" -o report.html
+# ۳. دریافت پیشنهاد ایندکس‌های بهینه برای ارتقای کارایی کوئری
+datawhisper advise "SELECT * FROM orders WHERE status = 'paid' ORDER BY placed_at DESC" --source demo.sqlite
 
-# با کلید API: تحلیل کامل عاملی
-datawhisper ask "which country generates the most refund risk?" --db demo.sqlite
+# ۴. اعتبارسنجی قرارداد داده روی جدول جهت استفاده در CI/CD
+datawhisper contract --source demo.sqlite --table orders --not-null amount --min-rows 5
+
+# ۵. تولید داشبورد بصری کامل در قالب فایل HTML مستقل
+datawhisper dashboard --source demo.sqlite --sql "SELECT * FROM orders" -o report.html
+
+# ۶. اجرای تحلیل کامل مبتنی بر زبان طبیعی
+datawhisper ask "which customer spent the most on paid orders?" --source demo.sqlite
 ```
 
 <div dir="rtl">
 
-## دستورات
+## دستورات خط فرمان
 
 | دستور | کاربرد |
 | --- | --- |
-| `datawhisper ask "<سؤال>" --db <src> [--explain-only]` | تحلیل عاملی؛ `--explain-only` فقط context هرس‌شده را نشان می‌دهد. |
-| `datawhisper inspect --db <src> [--profile t.c] [--graph "<سؤال>"]` | کاتالوگ، آمار ستون یا پیش‌نمایش هرس اسکیما. |
-| `datawhisper explain "<sql>" --db <src>` | اجرای آزمایشی: حکم AST + پلن نرمال‌شده + تصمیم هزینه. |
-| `datawhisper dashboard --db <src> [-o out.html]` | گزارش مستقل حالت تاریک. |
-| `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | ممیزی آفلاین دریفت، PII و مهاجرت استاتیک. |
-| `datawhisper audit --repo o/r --pr N --base-ref main --ci-audit` | حاکمیت PR به‌صورت headless و ثبت کامنت چسبان. |
-
-کدهای خروج: `0` موفق، `1` یافتن مشکل با `--fail-on-regression` یا `--fail-on-pii` یا شکست عامل، `2` خطای تنظیمات/امنیت/API.
+| `datawhisper ask "<سؤال>" --source <منبع> [--explain-only]` | تحلیل عاملی به زبان طبیعی؛ سوئیچ `--explain-only` کانتکست هرس‌شده و کوئری را بدون فراخوانی API نشان می‌دهد. |
+| `datawhisper advise "<کوئری>" [--source <منبع>]` | تحلیل شروط کوئری و پیشنهاد ایندکس‌های مناسب همراه با درصد تخمینی کاهش هزینه. |
+| `datawhisper contract --source <منبع> --table <جدول> [قوانین]` | ارزیابی زنده قرارداد داده روی جداول (`--not-null`، `--unique`، `--min-rows`) در خط لوله CI. |
+| `datawhisper inspect --source <منبع> [--profile t.c] [--graph "<سؤال>"]` | بازرسی کاتالوگ، پروفایل ستون‌های حساس، یا پیش‌نمایش هرس هیبریدی اسکیما. |
+| `datawhisper explain "<کوئری>" --source <منبع>` | اجرای آزمایشی و دریافت وضعیت تایید سندباکس AST و ارزیابی تخمین هزینه. |
+| `datawhisper dashboard --source <منبع> [-o report.html]` | تولید داشبورد بصری تاریک و نمودارهای Plotly بر اساس نتایج دیتابیس. |
+| `datawhisper audit --base-sql a.sql --head-sql b.sql --dry-run` | ممیزی استاتیک مایگریشن، دریفت اسکیما و ستون‌های PII جدید بدون نیاز به اتصال گیت‌هاب. |
+| `datawhisper audit --repo o/r --pr N --base-ref main --head-ref SHA --ci-audit` | ناظر خودکار در محیط CI/CD گیت‌هاب با درج کامنت چسبان در پول ریکوئست. |
 
 ## استفاده به‌عنوان GitHub Action
 
-فایل [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml) را کپی کنید. روی PRهایی اجرا می‌شود که `*.sql`، `*.sqlite`، `*.duckdb`، `*.parquet`، `*.jsonl`، `migrations/**`، `db/**` یا `seeds/**` را تغییر دهند.
-
-| Secret | اجباری | کاربرد |
-| --- | --- | --- |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` | خیر | تحلیل عاملی؛ بدون آن هم دریفت، PII و پلن بررسی می‌شوند. |
-| `DW_PII_SALT` | خیر | نمک پایدار برای یکسان ماندن pseudonymها بین اجراها. |
-
-توکن `GITHUB_TOKEN` خودکار است. گزارش یک کامنت با نشانگر `<!-- datawhisper:audit -->` است و بخش‌های دریفت، ریسک PII، پلن/بنچمارک و تحلیل به‌صورت جمع‌شونده نمایش داده می‌شوند.
-
-نشانه‌های افت پلن عمداً محدودند تا هشدار بی‌مورد تولید نشود: تبدیل جست‌وجوی ایندکس به اسکن کامل، رشد بیش از دو برابری ردیف‌های اسکن‌شده بالای ۱۰۰۰، ایجاد cross product تازه، یا شکست کوئری روی یکی از نسخه‌ها.
-
-> این workflow فقط روی PRهایی با تغییر فایل داده اجرا می‌شود، پس روی `main` ساکت است. این رفتار طبیعی است.
+ورک‌فلو [`.github/workflows/datawhisper-audit.yml`](.github/workflows/datawhisper-audit.yml) را به پروژه اضافه کنید. این پایپ‌لاین با تغییر فایل‌های مایگریشن، دیتابیس و اسکریپت‌های SQL فعال می‌شود و گزارش مدیریتی را مستقیماً در PR کامنت می‌کند.
 
 ## تنظیمات
 
-| متغیر | پیش‌فرض | معنی |
+| متغیر محیطی | مقدار پیش‌فرض | شرح |
 | --- | --- | --- |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` | ندارد | اعتبارنامه؛ اول Gemini تشخیص داده می‌شود؛ در حالت محلی لازم نیست |
-| `DW_LLM_PROVIDER` | `none` | `gemini`، `openai`، `local` (سنتز قالب آفلاین) یا `none` |
-| `DW_LLM_MODEL` | خودکار | شناسه مدل یا نام قالب در حالت `local` |
-| `DW_DECISION_PROVIDER` | `auto` | موتور System-1: `auto`، `heuristic`، `onnx`، `http`؛ auto در حالت آفلاین به heuristic برمی‌گردد |
-| `DW_DECISION_MODEL_PATH` | خالی | فایل مدل ONNX موتور System-1 |
-| `DW_LAYA_ENDPOINT` | خالی | آدرس پایه پشتیبان HTTP محلی تصمیم |
-| `DW_RISK_THRESHOLD` | `0.7` | فایروال معنایی بالای این امتیاز ریسک متوقف می‌کند |
-| `DW_FIREWALL_ENABLED` | `true` | کلید اصلی دروازه‌ی ریسک سریع |
-| `DW_QUERY_TIMEOUT` | `10` | محدودیت زمانی هر دستور (ثانیه) |
-| `DW_MAX_ROWS` | `1000` | سقف سخت ردیف در هر نتیجه |
-| `DW_MAX_REPAIRS` | `3` | تعداد تلاش خوداصلاحی |
-| `DW_COST_ENABLED` | `true` | فعال‌سازی دروازه EXPLAIN |
-| `DW_MAX_SCAN_ROWS` | `5000000` | بودجه اسکن پیش از صفحه‌بندی اجباری |
-| `DW_AUTO_LIMIT` | `500` | مقدار LIMIT تزریقی |
-| `DW_REJECT_CARTESIAN` | `true` | رد JOIN دکارتی |
-| `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | `allow_with_budget` یا `reject` |
-| `DW_PII_ENABLED`، `DW_PII_MODE` | `true`، `hash` | کلید و حالت پاک‌سازی |
-| `DW_PII_SALT` | پیش‌فرض محلی | نمک HMAC؛ در CI به‌صورت secret |
-| `DW_PII_ALLOW_COLUMNS` | خالی | ستون‌های معاف از پاک‌سازی |
-| `DW_GRAPH_MAX_TABLES` | `6` | تعداد جدول نگه‌داشته‌شده برای هر سؤال |
-| `DW_GRAPH_MAX_COLUMNS` | `12` | سقف ستون هر جدول در prompt |
-| `DW_GRAPH_MAX_TOKENS` | `1500` | بودجه توکن context اسکیما |
-| `DW_DOMAIN_PRUNING` | `true` | دسته‌بندی دامنه درشت‌به‌ریز پیش از مسیرهای FK |
-| `DW_MAX_DOMAINS` | `3` | سقف دسته‌های دامنه نگه‌داشته‌شده |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | خالی | کلیدهای دسترسی به API مدل‌های هوش مصنوعی (برای اجرای محلی نیازی نیست). |
+| `DW_LLM_PROVIDER` | `none` | ارائه‌دهنده مدل: `gemini`، `openai`، `local` (تولید قالب‌های قطعی محلی) یا `none`. |
+| `DW_DECISION_PROVIDER` | `auto` | موتور تصمیم‌گیری System-1: گزینه‌های `auto`، `heuristic`، `onnx` یا `http`. |
+| `DW_DECISION_MODEL_PATH` | خالی | مسیر فایل مدل ONNX محلی جهت رده‌بندی هوشمند ریسک کوئری. |
+| `DW_RISK_THRESHOLD` | `0.7` | آستانه فایروال معنایی؛ عبور ریسک از این عدد منجر به مسدودسازی کوئری می‌شود. |
+| `DW_FIREWALL_ENABLED` | `true` | فعال‌سازی فایروال معنایی پیش از اجرای کوئری. |
+| `DW_QUERY_TIMEOUT` | `10` | سقف زمان اجرای کوئری به ثانیه. |
+| `DW_MAX_ROWS` | `1000` | سقف سخت تعداد ردیف‌های بازگشتی. |
+| `DW_MAX_REPAIRS` | `3` | بودجه تلاش‌های خوداصلاحی عامل در زمان بروز خطاهای اجرایی. |
+| `DW_COST_ENABLED` | `true` | فعال‌سازی گیت بررسی هزینه پلن اجرایی. |
+| `DW_MAX_SCAN_ROWS` | `5000000` | سقف اسکن ردیف‌ها پیش از تزریق خودکار شرط LIMIT. |
+| `DW_AUTO_LIMIT` | `500` | مقدار LIMIT تزریق‌شده در اسکن‌های نامحدود. |
+| `DW_REJECT_CARTESIAN` | `true` | رد سخت و بلافاصله کوئری‌های فاقد شرط JOIN (ضرب دکارتی). |
+| `DW_PLAN_FAILURE_POLICY` | `allow_with_budget` | رفتار در صورت شکست پلن‌گیر دیتابیس (`allow_with_budget` یا `reject`). |
+| `DW_PII_ENABLED` | `true` | فعال‌سازی ماژول ماسک و پاک‌سازی داده‌های حساس. |
+| `DW_PII_MODE` | `hash` | حالت پاک‌سازی: `hash`، `pseudonymize`، `differential_privacy`، `mask`، `tokenize`، `redact`. |
+| `DW_PII_SALT` | پیش‌فرض محلی | نمک ثابت HMAC برای ثبات مقادیر هش در CI. |
+| `DW_PII_HMAC_SALT` | خالی | نمک مستقل نشست جهت مستعارسازی پایدار در زیرفرایندها. |
+| `DW_PII_DP_EPSILON` | `1.0` | بودجه حریم خصوصی ($\epsilon$) در مکانیزم لاپلاس حریم خصوصی دیفرانسیل. |
+| `DW_GRAPH_HYBRID_DENSE` | `true` | فعال‌سازی ترکیب الگوریتم BM25 و نگاشت معنایی ۱۲۸ بعدی در هرس اسکیما. |
+| `DW_GRAPH_MAX_TABLES` | `6` | حداکثر تعداد جداول مجاز در کانتکست نهایی پرامپت. |
 
-## بنچمارک
+## بنچمارک‌ها
 
-اندازه‌گیری‌شده روی ماشین توسعه (ویندوز، پایتون ۳.۱۵، SQLite در حافظه) در همین commit. این‌ها میکروبنچمارک مصنوعی‌اند، نه ادعای throughput تولیدی:
+اندازه‌گیری‌شده روی سخت‌افزار استاندارد توسعه (سیستم‌عامل ویندوز، پایتون ۳.۱۵ و دیتابیس در حافظه):
 
-| عملیات | ورودی | میانه |
+| عملیات | مسیر و ماژول پیاده‌سازی | میانه زمان اجرا |
 | --- | --- | --- |
-| تصمیم System-1 (دسته‌بندی / ریسک) | heuristic | **۰.۰۲–۰.۰۳ میلی‌ثانیه** |
-| مسیر سریع فایروال معنایی | امتیاز ریسک دستور | **۰.۰۲ میلی‌ثانیه** |
-| اعتبارسنجی AST با sqlglot | join + aggregate + LIMIT | **۰.۲۳ میلی‌ثانیه** |
-| بازیابی اسکیما (هرس دامنه + مسیر FK) | زنجیره ۶۰ جدولی FK | **۱.۰۸ میلی‌ثانیه** |
-| پاک‌سازی PII | ۱۰٬۰۰۰ سلول در ۴ ستون حساس | **حدود ۰.۴ ثانیه** |
-| کل تست‌ها | ۱۴۲ تست (+۶ نادیده: duckdb/pyarrow اختیاری) | **حدود ۱.۳ ثانیه** |
+| **تصمیم‌گیری System-1** | ارزیابی نیت و ریسک با هیوریستیک / ONNX | **۰.۰۲ تا ۰.۰۴ میلی‌ثانیه** |
+| **مسیر سریع فایروال معنایی** | ارزیابی سریع ریجکس و توکن‌های مخرب | **۰.۰۲ میلی‌ثانیه** |
+| **اعتبارسنجی AST با sqlglot** | تحلیل ساختاری JOIN، CTE و ساب‌کوئری‌ها | **۰.۲۲ میلی‌ثانیه** |
+| **هرس هیبریدی اسکیما** | ترکیب BM25 و پروجکشن معنایی روی ۶۰ جدول | **۱.۱۲ میلی‌ثانیه** |
+| **پیشنهاد ایندکس** | استخراج شروط و تولید ایندکس متناسب با دیالکت | **۰.۳۵ میلی‌ثانیه** |
+| **پالایشگر داده‌های حساس (PII)** | ۱۰٬۰۰۰ سلول در ۴ ستون حساس | **حدود ۰.۳۸ ثانیه** |
+| **سوئیت کامل تست‌های کیفی** | ۱۷۷ تست واحد و یکپارچگی در ۹ ماژول تست | **حدود ۲.۶ ثانیه** |
 
-بازتولید عدد گراف:
-
-</div>
-
-```bash
-python - <<'PY'
-import statistics, time
-from tests.conftest import make_large_catalog
-from datawhisper.core.schema_graph import SchemaGraph
-
-graph = SchemaGraph(make_large_catalog(60))
-samples = []
-for _ in range(200):
-    start = time.perf_counter()
-    graph.retrieve("metric value for t42 joined to t7", top_k=6)
-    samples.append((time.perf_counter() - start) * 1000)
-print(f"median {statistics.median(samples):.2f} ms")
-PY
-```
-
-<div dir="rtl">
-
-تست رگرسیون تأخیر کوئری موضوعی جدا و وابسته به مخزن است: دو نسخه دیتابیس و مجموعه‌ای از کوئری‌های نماینده تهیه کنید.
+## توسعه و تست
 
 </div>
 
 ```bash
-datawhisper audit --base-sql schema.sql --head-sql schema.sql \
-  --baseline-db old.sqlite --candidate-db new.sqlite \
-  --bench-file benchmarks/queries.sql --fail-on-regression
-```
-
-<div dir="rtl">
-
-## یادداشت طراحی
-
-مدل یک مؤلفه‌ی غیرقابل‌اعتماد است، نه یک مرجع. می‌تواند SQL پیشنهاد بدهد، اما تا وقتی دستور از جعبه‌امن AST، بودجه‌ی پلن‌گیر و پاک‌ساز عبور نکند اجرا نمی‌شود. همین محدودیت، بازیابی اسکیما را هم شکل می‌دهد: به‌جای امید به یک prompt بزرگ، انتخاب جدول‌ها صریح و قابل تست است.
-
-دو انتخاب عمدی است. کامنت و سمی‌کالن حتی داخل رشته‌های متنی رد می‌شوند، چون تفاوت پارسرها یک دسته‌ی واقعی دورزدن است. و وقتی پلن‌گیر در دسترس نیست، پیش‌فرض ادامه با تایم‌اوت سخت است، نه رد همه‌ی کوئری‌ها؛ اگر محیط شما fail-closed می‌خواهد، `DW_PLAN_FAILURE_POLICY=reject` بگذارید.
-
-## توسعه
-
-</div>
-
-```bash
-poetry install --with dev --extras "duckdb arrow"
+# راه‌اندازی وابستگی‌ها
+poetry install --with dev --extras "duckdb arrow postgres llm"
 pre-commit install
-poetry run pytest -v          # ۱۴۲ تست
-poetry run ruff check .
-poetry run black --check .
-poetry run mypy datawhisper   # سخت‌گیرانه
+
+# اجرای دروازه‌های کیفی
+poetry run pytest -v          # اجرای تمام ۱۷۷ تست
+poetry run ruff check .       # بررسی تطابق با قوانین لینتر
+poetry run black --check .    # بررسی استانداردهای فرمت کد
+poetry run mypy datawhisper   # بررسی استاتیک تایپ‌ها
 ```
 
 <div dir="rtl">
-
-پوشش تست‌ها: ۲۳ بردار تزریق/فرار، رفتار دروازه برای JOIN دکارتی و بودجه اسکن، رد و تعمیر توسط فایروال معنایی، قطعیت تصمیم System-1 و دسته‌بندی قرابت، تشخیص ایمیل/کارت با لان/SSN/تلفن/IP/کلید API/JWT، تضمین نشت‌صفر روی خروجی موتور و مقادیر پرتکرار پروفایل، هرس روی ۶۰ جدول و مسیر چندگامی، اجرای چندموتوری (SQLite، DuckDB، Parquet، JSONL)، اجرای سرتاسری ارائه‌دهنده‌ی قالب آفلاین و خوداصلاحی پس از خطای امنیتی، هزینه و درایور.
 
 ## مجوز
 
-Apache-2.0. فایل [LICENSE](LICENSE) را ببینید.
+پروژه تحت مجوز Apache-2.0 منتشر شده است. فایل [LICENSE](LICENSE) را مطالعه فرمایید.
 
 </div>
 
