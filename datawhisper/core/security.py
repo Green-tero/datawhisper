@@ -632,11 +632,14 @@ def detect_cartesian_joins(sql: str, dialect: str = "sqlite") -> list[list[str]]
                     ordered = sorted(linked)
                     for alias in ordered[1:]:
                         union.union(ordered[0], alias)
-            elif join.args.get("using") or join.args.get("method") == "NATURAL":
+            elif (
+                (join.args.get("using") or join.args.get("method") == "NATURAL")
+                and previous in scope
+                and joined in scope
+            ):
                 # USING/NATURAL joins are joins by definition; connect the new
                 # table to its left neighbour instead of flagging a cartesian.
-                if previous in scope and joined in scope:
-                    union.union(previous, joined)
+                union.union(previous, joined)
             if joined:
                 previous = joined
 

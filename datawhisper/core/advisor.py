@@ -166,8 +166,8 @@ class IndexAdvisor:
             seen_signatures.add(sig)
 
             idx_name = f"idx_{tbl_name}_{'_'.join(col_tuple)}"
-            # Sanitize identifier
-            idx_name = re.sub(r"[^a-zA-Z0-9_]", "", idx_name)
+            # Sanitize identifier and cap length for PostgreSQL identifier limits (63 chars)
+            idx_name = re.sub(r"[^a-zA-Z0-9_]", "", idx_name)[:63]
 
             cols_str = ", ".join(f'"{c}"' for c in col_tuple)
             if self.dialect.lower() == "postgres":

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.5] - 2026-11-21
+
+### Fixed & Hardened
+
+- **CI Linter Compliance (Ruff SIM102)**: Resolved nested conditional statement in `detect_cartesian_joins` (`security.py`), satisfying newer Ruff linter rules across multi-python CI matrix environments.
+- **Differential Privacy Lower-Bound Protection**: Protected naturally non-negative count metrics against unbounded negative Laplace noise injection in `_apply_laplace_noise` (`privacy.py`) when no explicit `clamp_min` is specified.
+- **PostgreSQL Identifier Length Bounds**: Capped auto-generated index names to 63 characters in `IndexAdvisor.advise()` (`advisor.py`) to prevent identifier truncation and collisions under PostgreSQL's 64-byte `NAMEDATALEN` limit.
+
 ## [1.5.4] - 2026-11-21
 
 ### Added

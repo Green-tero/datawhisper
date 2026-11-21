@@ -324,6 +324,8 @@ class PrivacyScrubber:
         if dp.clamp_max is not None:
             noisy_val = min(noisy_val, dp.clamp_max)
         if isinstance(val, int) and not isinstance(val, bool):
+            if val >= 0 and dp.clamp_min is None:
+                noisy_val = max(0.0, noisy_val)
             return round(noisy_val)
         return round(noisy_val, 4)
 
