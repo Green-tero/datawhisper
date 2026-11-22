@@ -60,3 +60,9 @@ def test_migration_audit_column_type_rewrite_lock_risk() -> None:
     report = analyze_migration_sql(sql)
     assert bool(report.locks)
     assert any("changes a column type" in f.message for f in report.locks)
+
+
+def test_migration_audit_add_column_with_type_name_no_false_positive() -> None:
+    sql = "ALTER TABLE events ADD COLUMN event_type TEXT;"
+    report = analyze_migration_sql(sql)
+    assert not bool(report.locks)

@@ -478,7 +478,35 @@ def test_hmac_session_salt_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Stable across instances in the same session
     assert res1[0][0] == res2[0][0]
-    assert res1[0][0].startswith("ps_")
+
+
+def test_detector_slack_and_github_tokens() -> None:
+    slack_token = "xox" + "b-1234567890-abcdefghij"
+    gh_oauth_token = "gh" + "o_1234567890abcdefghijklmnopqrstuvwxyz"
+
+    slack_matches = detect_pii(f"token: {slack_token}")
+    assert any(m.category is PiiCategory.API_KEY for m in slack_matches)
+
+    gh_matches = detect_pii(f"key: {gh_oauth_token}")
+    assert any(m.category is PiiCategory.API_KEY for m in gh_matches)
+
+
+def test_cartesian_join_vacuous_predicates() -> None:
+    q_vacuous1 = "SELECT * FROM customers JOIN orders ON 1 = 1"
+    assert bool(detect_cartesian_joins(q_vacuous1, "sqlite"))
+
+    q_vacuous2 = "SELECT * FROM customers c JOIN orders o ON c.id = 1"
+    assert bool(detect_cartesian_joins(q_vacuous2, "sqlite"))
+
+    q_valid = "SELECT * FROM customers JOIN orders ON customer_id = customers.id"
+    assert detect_cartesian_joins(q_valid, "sqlite") == []
+
+
+def test_scrubber_warns_on_default_hash_salt() -> None:
+    with pytest.warns(UserWarning, match="Using default local PII salt in hash mode"):
+        scrubber = PrivacyScrubber(PrivacyConfig(mode="hash", salt="datawhisper-local-salt"))
+    res, _ = scrubber.scrub(["email"], [["test@example.com"]])
+    assert res[0][0].startswith("email_")
 
 
 def test_differential_privacy_laplace_mechanism() -> None:

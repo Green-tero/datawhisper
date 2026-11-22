@@ -17,3 +17,7 @@ datawhisper_dashboard.html
 
 .env
 .mimosa/
+
+# Local-only agent files
+LOCAL_AGENT_RULES.md
+all_code*.txt

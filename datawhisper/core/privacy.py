@@ -30,6 +30,7 @@ import os
 import random
 import re
 import secrets
+import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -192,7 +193,9 @@ def detect_pii(value: str) -> list[PiiMatch]:
                 )
             )
 
-    if any(k in value for k in ("sk-", "AKIA", "ghp_", "AIza")):
+    if any(
+        k in value for k in ("sk-", "AKIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xox", "AIza")
+    ):
         for match in _API_KEY.finditer(value):
             candidates.append(
                 PiiMatch(
@@ -294,6 +297,12 @@ class PrivacyScrubber:
         self._allow = {name.lower() for name in self.config.column_allowlist}
         self._tokens: dict[tuple[PiiCategory, str], str] = {}
         self._counters: dict[PiiCategory, int] = {}
+        if self.config.mode == "hash" and self.config.salt == "datawhisper-local-salt":
+            warnings.warn(
+                "Using default local PII salt in hash mode; set DW_PII_SALT for production/CI.",
+                UserWarning,
+                stacklevel=2,
+            )
         env_hmac_salt = os.environ.get("DW_PII_HMAC_SALT", "").strip()
         env_pii_salt = os.environ.get("DW_PII_SALT", "").strip()
         if env_hmac_salt:

@@ -164,7 +164,7 @@ class LLMConfig(BaseModel):
     def resolve_model(self) -> str:
         if self.model:
             return self.model
-        return "gemini-2.5-flash" if self.provider == "gemini" else "gpt-4o-mini"
+        return "gemini-3-flash" if self.provider == "gemini" else "gpt-4o-mini"
 
 
 class GitHubConfig(BaseModel):

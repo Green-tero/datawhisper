@@ -396,7 +396,7 @@ def dashboard(
                         agent_result = agent.run(question)
                     redactions = agent_result.redactions or redactions
                     kpis.append(KpiCard("agent turns", str(len(agent_result.steps))))
-                    _print_agent_result(agent_result)
+                    _print_agent_result(agent_result, config)
                     blocks.append(timeline_block(agent_result.steps))
 
         redaction_groups = len(redactions.by_category) if redactions else 0
@@ -433,7 +433,10 @@ def audit(
     baseline_db: Annotated[Path | None, typer.Option(help="Baseline DB for benchmarks.")] = None,
     candidate_db: Annotated[Path | None, typer.Option(help="Candidate DB for benchmarks.")] = None,
     bench_file: Annotated[Path | None, typer.Option(help="Benchmark suite file.")] = None,
-    db: Annotated[Path | None, typer.Option(help="Dataset for agentic insights.")] = None,
+    db: Annotated[
+        Path | None,
+        typer.Option("--db", "--source", help="Dataset for agentic insights."),
+    ] = None,
     question: Annotated[
         str, typer.Option(help="Insight question for the agent.")
     ] = DEFAULT_AUDIT_QUESTION,
@@ -607,7 +610,10 @@ def advise(
     source: Annotated[
         str,
         typer.Option(
-            "--source", "-s", help="Database source (.sqlite, .duckdb, .parquet, postgres://)"
+            "--source",
+            "--db",
+            "-s",
+            help="Database source (.sqlite, .duckdb, .parquet, postgres://)",
         ),
     ] = ":memory:",
 ) -> None:
@@ -647,7 +653,10 @@ def contract(
     source: Annotated[
         str,
         typer.Option(
-            "--source", "-s", help="Database source (.sqlite, .duckdb, .parquet, postgres://)"
+            "--source",
+            "--db",
+            "-s",
+            help="Database source (.sqlite, .duckdb, .parquet, postgres://)",
         ),
     ],
     table: Annotated[

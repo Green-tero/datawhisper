@@ -171,8 +171,9 @@ class SyntheticDataGenerator:
         dataset = self.generate_dataset(catalog)
         backend = SQLiteBackend(None)
 
-        # Create tables
-        for table in catalog.tables:
+        # Create tables in topological order respecting foreign keys
+        conn = backend.connection
+        for table in _topological_sort_tables(list(catalog.tables)):
             col_defs: list[str] = []
             pk_cols = [col.name for col in table.columns if col.primary_key]
             for col in table.columns:
@@ -183,16 +184,16 @@ class SyntheticDataGenerator:
                 col_defs.append(pk_clause)
 
             q_table = _quote_ident(table.name)
-            backend._conn.execute(f"CREATE TABLE {q_table} ({', '.join(col_defs)})")
+            conn.execute(f"CREATE TABLE {q_table} ({', '.join(col_defs)})")
 
             # Insert rows
             t_name = table.name.lower()
             rows = dataset.get(t_name, [])
             if rows:
                 placeholders = ", ".join("?" for _ in table.columns)
-                backend._conn.executemany(
+                conn.executemany(
                     f"INSERT INTO {q_table} VALUES ({placeholders})",
                     rows,
                 )
-        backend._conn.commit()
+        conn.commit()
         return ExecutionEngine(backend, config or DataWhisperConfig())

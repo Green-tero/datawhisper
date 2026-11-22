@@ -164,16 +164,13 @@ class OpenAIProvider:
 
 
 class GeminiProvider:
-    """Google Gemini adapter supporting modern google-genai and legacy fallback."""
+    """Google Gemini adapter using the official google-genai SDK."""
 
     def __init__(self, config: LLMConfig) -> None:
         if not config.api_key:
             raise ProviderError("GEMINI_API_KEY is not set")
         self._model_name = config.resolve_model()
         self._temperature = config.temperature
-        self._client: Any = None
-        self._types: Any = None
-        self._legacy_genai: Any = None
 
         try:
             from google import genai
@@ -181,63 +178,31 @@ class GeminiProvider:
 
             self._client = genai.Client(api_key=config.api_key)
             self._types = types
-        except ImportError:
-            try:
-                import google.generativeai as legacy_genai
-
-                legacy_genai.configure(api_key=config.api_key)
-                self._legacy_genai = legacy_genai
-            except ImportError as exc:  # pragma: no cover
-                raise ProviderError(
-                    "Gemini provider requires: pip install 'datawhisper[llm]'"
-                ) from exc
+        except ImportError as exc:  # pragma: no cover
+            raise ProviderError("Gemini provider requires: pip install 'datawhisper[llm]'") from exc
 
     def complete(self, messages: Sequence[Message]) -> str:
         system_chunks = [m["content"] for m in messages if m["role"] == "system"]
-        if self._client is not None:
-            contents = [
-                self._types.Content(
-                    role="model" if m["role"] == "assistant" else "user",
-                    parts=[self._types.Part.from_text(text=m["content"])],
-                )
-                for m in messages
-                if m["role"] != "system"
-            ]
-            response = self._client.models.generate_content(
-                model=self._model_name,
-                contents=contents,
-                config=self._types.GenerateContentConfig(
-                    system_instruction="\n\n".join(system_chunks) or None,
-                    temperature=self._temperature,
-                ),
+        contents = [
+            self._types.Content(
+                role="model" if m["role"] == "assistant" else "user",
+                parts=[self._types.Part.from_text(text=m["content"])],
             )
-            text = response.text or ""
-            if not text.strip():
-                raise ProviderError("Gemini returned an empty completion")
-            return text
-        else:
-            contents = [
-                {
-                    "role": "model" if m["role"] == "assistant" else "user",
-                    "parts": [m["content"]],
-                }
-                for m in messages
-                if m["role"] != "system"
-            ]
-            model = self._legacy_genai.GenerativeModel(
-                model_name=self._model_name,
+            for m in messages
+            if m["role"] != "system"
+        ]
+        response = self._client.models.generate_content(
+            model=self._model_name,
+            contents=contents,
+            config=self._types.GenerateContentConfig(
                 system_instruction="\n\n".join(system_chunks) or None,
-            )
-            response = model.generate_content(
-                contents,
-                generation_config=self._legacy_genai.GenerationConfig(
-                    temperature=self._temperature
-                ),
-            )
-            text = getattr(response, "text", "") or ""
-            if not text.strip():
-                raise ProviderError("Gemini returned an empty completion")
-            return text
+                temperature=self._temperature,
+            ),
+        )
+        text = response.text or ""
+        if not text.strip():
+            raise ProviderError("Gemini returned an empty completion")
+        return text
 
 
 class ScriptedProvider:

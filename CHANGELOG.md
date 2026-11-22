@@ -1,26 +1,26 @@
 # Changelog
 
-## [1.5.6] - 2026-11-22
+## [1.5.9] - 2026-11-22
 
 ### Fixed & Hardened
 
-- **CI Workflow Matrix Bug**: Fixed Cartesian product expansion in `.github/workflows/ci.yml` that previously generated 16 failing jobs across nonexistent/unsupported Python runtimes. Standardized CI matrix to Python 3.11, 3.12, and 3.13.
-- **Data Contract SQL Injection Hardening**: Implemented strict identifier quoting (`_quote_ident`) and literal sanitization (`_sql_lit`) in `verify_table_contract()` (`semantic.py`) to safely handle table/column names and values with single quotes (e.g., `"O'Brien"`).
-- **Topological Sorting in Synthetic Data Generator**: Replaced naive foreign key count sorting with Kahn's topological sort algorithm (`_topological_sort_tables`), ensuring parent tables are always generated before dependent child tables, and added composite primary key support.
-- **Differential Privacy Environment Activation**: Added `"differential_privacy"` to recognized choices in `PrivacyConfig.from_env()`, allowing `DW_PII_MODE=differential_privacy` to be activated directly via environment variables.
-- **PostgreSQL Catalog Safety**: Initialized `row_count` before executing catalog queries in `PostgresBackend.introspect()`, filtered by `schema_name`, and retrieved primary key constraints from `information_schema.table_constraints`.
-- **Index Advisor Alias Resolution & Plan Integration**: Resolved table aliases to actual table names in `IndexAdvisor` before generating DDL, and inspected `PlanNode` properties to accurately factor sequential scans into estimated cost reductions.
-- **Cartesian Join False-Positive Fix**: Fixed false-positive Cartesian join rejection for unaliased columns in `ON` clauses (`orders JOIN customers ON customer_id = customers.id`).
-- **Migration Audit Scoping & Detection**: Scoped foreign key index checks to `(table_name, column_name)` pairs and correctly inspected `ColumnConstraint` reference kinds for both `ALTER` and `CREATE TABLE`.
-- **DuckDB Graceful Cancellation**: Replaced abrupt connection closing in `DuckDBBackend.cancel()` with non-destructive native `self._conn.interrupt()`.
-- **PII Scrubbing Latency Fast-Path**: Converted `PiiMatch` to `@dataclass(slots=True)` and added fast-path substring and digit checks in `detect_pii()`, reducing per-cell scanning time by ~85%.
-- **GitHub Bot Reliability**: Added pagination to PR file and comment listing in `github_bot.py` and safe Markdown comment truncation that preserves unclosed `<details>` tags.
+- **CI Workflow Matrix Bug**: Fixed Cartesian product expansion in `.github/workflows/ci.yml` that previously generated 16 failing jobs. Standardized matrix to official Python 3.11, 3.12, and 3.13 runtimes.
+- **Cartesian Join Detection Hardening**: Required at least two column references in join predicates to prevent vacuous conditions (`ON 1 = 1`, `ON TRUE`, `ON c.id = 1`) from bypassing Cartesian rejection in `detect_cartesian_joins()` (`security.py`).
+- **PII Detector Fast-Path Prefix Expansion**: Expanded credential prefixes in `detect_pii()` (`privacy.py`) to cover all Slack tokens (`xoxb-`, `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-`) and GitHub tokens (`gho_`, `ghu_`, `ghs_`, `ghr_`).
+- **Default PII Salt Warning**: Emitted a `UserWarning` when running in `hash` mode with the default local salt to prompt configuration of `DW_PII_SALT` in CI/production.
+- **Migration Audit False Positive Fix**: Replaced raw string matching (`"TYPE" in act_sql`) with AST inspection of `exp.AlterColumn` and `exp.DataType`, preventing false-positive lock-risk warnings on `ADD COLUMN` for columns containing "type" in their name (e.g. `event_type`). Removed dead helper `_statement_indexed_columns`.
+- **Data Contract SQL Injection Hardening**: Added strict identifier quoting (`_quote_ident`) and literal sanitization (`_sql_lit`) in `verify_table_contract()` (`semantic.py`) for tables, columns, and values with single quotes.
+- **Topological Sorting in Synthetic Generator**: Implemented Kahn's topological sort algorithm (`_topological_sort_tables`) in `synthetic.py` to guarantee parent tables are created and seeded before dependent child tables.
+- **PostgreSQL Composite Foreign Key Introspection**: Replaced Cartesian-prone `kcu` x `ccu` join with `referential_constraints` and `position_in_unique_constraint` matching, preserving composite foreign keys without duplicate rows.
+- **ExecutionEngine Plan-Aware Advisor & Clean Interrupt**: Passed actual execution plans to `IndexAdvisor` from `advise_query()`, and avoided poisoning DuckDB backends when native query interruption succeeds without closing the connection.
+- **SSRF Boundary Fix in Remote Decision Engine**: Evaluated `is_link_local` before `is_private` in `RemoteDecisionEngine` to reliably block AWS/GCP cloud metadata endpoints (`169.254.169.254`).
 
 ### Added
 
-- **2026 Model & SDK Updates**: Modernized `GeminiProvider` to support the official `google-genai` client without global process state, defaulting to `gemini-2.5-flash`.
-- **Comprehensive Test Suite**: Added 21 new tests across CLI commands, configuration parsing, and migration audits, bringing the total suite to **198 passing tests**.
-- **Standard Project Files & Docs**: Added `SECURITY.md`, `CONTRIBUTING.md`, `benchmarks/run_benchmarks.py`, `examples/demo_schema.sql`, `examples/sample_contract.py`, `docs/configuration.md`, and dedicated Persian documentation at `docs/README.fa.md`.
+- **Modern SDK & Model Defaults**: Migrated `GeminiProvider` strictly to the official `google-genai` SDK (removing legacy `google.generativeai` shims) and defaulted to `gemini-3-flash`.
+- **CLI Option Parity**: Added `--db` as an alias for `--source` on `advise` and `contract`, and `--source` as an alias for `--db` on `audit`.
+- **Test Suite Expansion**: Added unit tests for SSRF boundaries, dashboard auto-charts, audit HTML rendering, dry-run CLI execution, and Cartesian join edge cases, bringing the test suite to **206 passing tests**.
+- **Local Rulebook & Documentation**: Created practical `SECURITY.md`, `CONTRIBUTING.md`, `benchmarks/run_benchmarks.py`, `examples/demo_schema.sql`, `examples/sample_contract.py`, `docs/configuration.md`, and natural Persian docs at `docs/README.fa.md`.
 
 ## [1.5.5] - 2026-11-21
 

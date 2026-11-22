@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,6 +11,22 @@ import pytest
 from datawhisper.core.config import DataWhisperConfig
 from datawhisper.core.database import ExecutionEngine
 from datawhisper.core.models import CatalogSnapshot, ColumnInfo, ForeignKeyInfo, TableInfo
+
+
+def _turn(action: str, **payload: object) -> str:
+    """Format one simulated ReAct agent turn as a JSON string."""
+    return json.dumps({"thought": "step", "action": action, "action_input": payload})
+
+
+def _final(answer: str, sql: str | None = None) -> str:
+    """Format simulated final answer as a JSON string."""
+    return json.dumps(
+        {
+            "thought": "done",
+            "action": "final_answer",
+            "action_input": {"answer": answer, "sql": sql},
+        }
+    )
 
 
 @pytest.fixture

@@ -413,15 +413,15 @@ class RemoteDecisionEngine:
             raise DecisionBackendError(f"decision endpoint host unresolved: {host!r}") from exc
         for address in resolved:
             ip = ipaddress.ip_address(address)
-            if ip.is_loopback or ip.is_private:
-                continue
             if ip.is_link_local:
                 raise DecisionBackendError(
                     f"decision endpoint resolves to link-local {address} "
                     "(cloud-metadata range is denied)"
                 )
+            if ip.is_loopback or ip.is_private:
+                continue
             raise DecisionBackendError(
-                f"decision endpoint must resolve to a loopback/private address, " f"got {address}"
+                f"decision endpoint must resolve to a loopback/private address, got {address}"
             )
         self._endpoint = endpoint.rstrip("/")
         self._timeout = timeout

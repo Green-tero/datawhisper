@@ -14,7 +14,7 @@ from datawhisper.core.decision_engine import (
 )
 from datawhisper.core.models import LatencyTelemetry
 from datawhisper.core.security import SecurityViolation, SemanticFirewall
-from tests.test_agent_and_engines import _final, _turn
+from tests.conftest import _final, _turn
 
 
 # ---------------------------------------------------------------------------
@@ -197,3 +197,20 @@ def test_agent_firewall_rejects_injection_before_model_call(engine: object) -> N
     assert not result.success
     assert "firewall" in result.answer.lower()
     assert not result.steps  # no model turn ever happened
+
+
+def test_remote_decision_engine_ssrf_boundary() -> None:
+    with pytest.raises(DecisionBackendError, match="must use http/https"):
+        RemoteDecisionEngine("file:///etc/passwd")
+
+    with pytest.raises(DecisionBackendError, match="must use http/https"):
+        RemoteDecisionEngine("ftp://127.0.0.1:8000")
+
+    with pytest.raises(DecisionBackendError, match="cloud-metadata range is denied"):
+        RemoteDecisionEngine("http://169.254.169.254/latest/meta-data")
+
+    with pytest.raises(DecisionBackendError, match="must resolve to a loopback/private address"):
+        RemoteDecisionEngine("http://8.8.8.8:8080/decision")
+
+    engine = RemoteDecisionEngine("http://127.0.0.1:8000/decision")
+    assert engine.name == "remote:http://127.0.0.1:8000/decision"

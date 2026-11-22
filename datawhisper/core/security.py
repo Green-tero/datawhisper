@@ -632,17 +632,24 @@ def detect_cartesian_joins(sql: str, dialect: str = "sqlite") -> list[list[str]]
             on_clause = join.args.get("on")
             if isinstance(on_clause, exp.Expression):
                 linked = _aliases_in(on_clause, scope)
+                cols_in_on = list(on_clause.find_all(exp.Column))
                 if len(linked) >= 2:
                     ordered = sorted(linked)
                     for alias in ordered[1:]:
                         union.union(ordered[0], alias)
-                elif len(linked) == 1 and joined in scope:
+                elif len(linked) == 1 and len(cols_in_on) >= 2 and joined in scope:
                     alias = next(iter(linked))
                     if alias != joined:
                         union.union(alias, joined)
                     elif previous and previous in scope:
                         union.union(previous, joined)
-                elif len(linked) == 0 and previous and previous in scope and joined in scope:
+                elif (
+                    len(linked) == 0
+                    and len(cols_in_on) >= 2
+                    and previous
+                    and previous in scope
+                    and joined in scope
+                ):
                     union.union(previous, joined)
             elif (
                 (join.args.get("using") or join.args.get("method") == "NATURAL")

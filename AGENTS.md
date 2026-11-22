@@ -8,7 +8,7 @@ instead of re-deriving them.
 
 - **Product:** DataWhisper — local-first agentic database copilot and CI/CD
   database governance engine. Public repo: `Green-tero/datawhisper`.
-- **Release line:** 1.5.x (current release 1.5.6). Keep `pyproject.toml`,
+- **Release line:** 1.5.x (current release 1.5.9). Keep `pyproject.toml`,
   `datawhisper/__init__.py`, README badge and CHANGELOG in sync on every bump.
 - **Dual role:** interactive local CLI/dashboard AND an autonomous PR auditor
   GitHub Action. Both share the same core.
@@ -19,9 +19,9 @@ instead of re-deriving them.
 datawhisper/
   core/
     decision_engine.py   System-1: heuristic/ONNX/HTTP backends, <20ms decisions
-    schema_graph.py      Hybrid BM25 + dense semantic retrieval + FK graph + Dijkstra paths
+    schema_graph.py      BM25 + 128-dim character-trigram feature hashing + FK graph + Dijkstra paths
     security.py          three-layer AST sandbox + EXPLAIN cost gate + SemanticFirewall
-    privacy.py           PII detection + 5 redaction modes (including differential privacy)
+    privacy.py           PII detection + 6 redaction modes (including differential privacy)
     semantic.py          Semantic layer (governed metrics) + declarative Data Contracts
     advisor.py           AST-driven automated Index Advisor & Cost Optimizer
     synthetic.py         Mock data generator from CatalogSnapshot with referential integrity
@@ -72,7 +72,7 @@ datawhisper/
 ## Testing & quality gates (required before pushing)
 
 ```bash
-poetry run pytest -v          # full suite (198 tests)
+poetry run pytest -v          # full suite (206 tests)
 poetry run ruff check .       # clean
 poetry run black --check .    # clean
 poetry run mypy datawhisper   # strict, no issues
@@ -85,11 +85,12 @@ poetry run mypy datawhisper   # strict, no issues
 
 ## Latency budget (measured headroom)
 
-- schema retrieval (60-table): ~0.7ms · AST validate: ~0.4ms · 10k-cell scrub:
-  ~29ms. System-1 targets <40ms, System-2 is dominated by the local model.
+- schema retrieval (50-table): ~1.3ms · AST validate: ~0.77ms · 10k-cell scrub:
+  ~61ms · System-1 decision: ~23µs. System-2 is dominated by the local model.
 
 ## Memory pointers
 
-- Docs live in `README.md` (bilingual) and `CHANGELOG.md`. Long-lived
-  decisions belong in this file rather than chat history.
+- Docs live in `README.md`, `docs/README.fa.md`, `docs/configuration.md` and
+  `CHANGELOG.md`. Long-lived decisions belong in this file rather than chat
+  history.
 - Start a fresh session for unrelated work; this file reloads the context.

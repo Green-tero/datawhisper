@@ -100,3 +100,24 @@ def test_cli_ask_explain_only(sqlite_db: str) -> None:
     )
     assert result.exit_code == 0
     assert "pruned schema context" in result.stdout
+
+
+def test_cli_audit_dry_run(tmp_path: Path) -> None:
+    base_sql = tmp_path / "base.sql"
+    head_sql = tmp_path / "head.sql"
+    base_sql.write_text("CREATE TABLE users (id INTEGER PRIMARY KEY);")
+    head_sql.write_text("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);")
+
+    result = runner.invoke(
+        app,
+        [
+            "audit",
+            "--base-sql",
+            str(base_sql),
+            "--head-sql",
+            str(head_sql),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Schema Audit" in result.stdout or "audit" in result.stdout.lower()

@@ -7,7 +7,7 @@ Source           Backend                     Notes
 ===============  ==========================  ==================================
 ``.sqlite/.db``  SQLite (stdlib)             opened ``mode=ro`` plus ``query_only``
 ``.duckdb``      DuckDB (optional)           opened ``read_only=True``
-``.parquet``     DuckDB in-memory view       file access disabled after registration
+``.parquet``     DuckDB in-memory view       read-only view; file functions blocked at AST layer
 ``.jsonl``       DuckDB in-memory view       vectorized JSON extraction
 ``.csv``         DuckDB, SQLite fallback     typed ingest when DuckDB is absent
 ``postgres://``  psycopg (optional)          read-only transaction + statement_timeout
@@ -732,27 +732,36 @@ class PostgresBackend:
             ]
             keys: list[ForeignKeyInfo] = []
             with contextlib.suppress(Exception):
-                key_rows = self._conn.execute(
-                    "SELECT kcu.column_name, ccu.table_name, ccu.column_name "
-                    "FROM information_schema.table_constraints tc "
-                    "JOIN information_schema.key_column_usage kcu "
-                    "ON tc.constraint_name = kcu.constraint_name "
-                    "AND tc.table_schema = kcu.table_schema "
-                    "JOIN information_schema.constraint_column_usage ccu "
-                    "ON tc.constraint_name = ccu.constraint_name "
-                    "AND tc.table_schema = ccu.table_schema "
-                    "WHERE tc.constraint_type = 'FOREIGN KEY' "
-                    "AND tc.table_name = %s AND tc.table_schema = %s",
-                    (table_name, schema_name),
-                ).fetchall()
+                fk_query = (
+                    "SELECT kcu1.constraint_name, kcu1.column_name, "
+                    "kcu2.table_name, kcu2.column_name "
+                    "FROM information_schema.referential_constraints rc "
+                    "JOIN information_schema.key_column_usage kcu1 "
+                    "  ON kcu1.constraint_name = rc.constraint_name "
+                    "  AND kcu1.table_schema = rc.constraint_schema "
+                    "JOIN information_schema.key_column_usage kcu2 "
+                    "  ON kcu2.constraint_name = rc.unique_constraint_name "
+                    "  AND kcu2.table_schema = rc.unique_constraint_schema "
+                    "  AND kcu1.position_in_unique_constraint = kcu2.ordinal_position "
+                    "WHERE kcu1.table_name = %s AND kcu1.table_schema = %s "
+                    "ORDER BY kcu1.constraint_name, kcu1.ordinal_position"
+                )
+                key_rows = self._conn.execute(fk_query, (table_name, schema_name)).fetchall()
+                fk_groups: dict[str, tuple[str, list[str], list[str]]] = {}
+                for c_name, from_col, to_tbl, to_col in key_rows:
+                    c_name_str = str(c_name)
+                    if c_name_str not in fk_groups:
+                        fk_groups[c_name_str] = (str(to_tbl), [], [])
+                    fk_groups[c_name_str][1].append(str(from_col))
+                    fk_groups[c_name_str][2].append(str(to_col))
                 keys = [
                     ForeignKeyInfo(
                         from_table=table_name,
-                        from_columns=[str(row[0])],
-                        to_table=str(row[1]),
-                        to_columns=[str(row[2])],
+                        from_columns=from_cols,
+                        to_table=target_table,
+                        to_columns=to_cols,
                     )
-                    for row in key_rows
+                    for target_table, from_cols, to_cols in fk_groups.values()
                 ]
             row_count: int | None = None
             with contextlib.suppress(Exception):
@@ -1032,8 +1041,15 @@ class ExecutionEngine:
         """Run AST-driven index advisory to propose optimal covering indexes."""
         from datawhisper.core.advisor import IndexAdvisor
 
+        plan = None
+        try:
+            statement = validate_or_raise(sql, self.backend.dialect).sql
+            plan = self.backend.explain(statement)
+        except Exception:
+            plan = None
+
         advisor = IndexAdvisor(dialect=self.backend.dialect)
-        return advisor.advise(sql, catalog=self.introspect())
+        return advisor.advise(sql, catalog=self.introspect(), plan=plan)
 
     def close(self) -> None:
         if hasattr(self, "_executor"):
@@ -1081,7 +1097,7 @@ class ExecutionEngine:
             result = future.result(timeout=timeout)
         except FuturesTimeoutError as exc:
             self.backend.cancel()
-            if self.backend.driver_name in _DRIVERS_WITHOUT_INTERRUPT:
+            if getattr(self.backend, "_closed", False) or self.backend.driver_name == "postgres":
                 self._poisoned = True
             raise QueryTimeoutError(f"statement exceeded the {timeout}s execution budget") from exc
         except QueryExecutionError as exc:

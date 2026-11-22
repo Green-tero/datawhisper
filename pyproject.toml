@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "datawhisper"
-version = "1.5.6"
+version = "1.5.9"
 description = "Zero-trust agentic data analysis and CI/CD database governance engine with graph-pruned context, Arrow pipelines and PII-safe outputs."
 authors = ["DataWhisper Maintainers <maintainers@datawhisper.local>"]
 license = "Apache-2.0"
@@ -26,14 +26,13 @@ duckdb = { version = ">=1.0", optional = true }
 psycopg = { version = "^3.1", optional = true, extras = ["binary"] }
 openai = { version = ">=1.30", optional = true }
 google-genai = { version = ">=0.1.0", optional = true }
-google-generativeai = { version = ">=0.6", optional = true }
 
 [tool.poetry.extras]
 arrow = ["pyarrow", "polars"]
 duckdb = ["duckdb"]
 postgres = ["psycopg"]
-llm = ["openai", "google-genai", "google-generativeai"]
-all = ["pyarrow", "polars", "duckdb", "psycopg", "openai", "google-genai", "google-generativeai"]
+llm = ["openai", "google-genai"]
+all = ["pyarrow", "polars", "duckdb", "psycopg", "openai", "google-genai"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2"

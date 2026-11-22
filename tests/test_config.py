@@ -60,4 +60,4 @@ def test_config_hmac_salt_precedence() -> None:
 
 def test_config_gemini_2026_model_default() -> None:
     llm = LLMConfig(provider="gemini")
-    assert llm.resolve_model() == "gemini-2.5-flash"
+    assert llm.resolve_model() == "gemini-3-flash"

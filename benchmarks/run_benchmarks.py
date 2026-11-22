@@ -6,7 +6,7 @@ import time
 
 from datawhisper.core.config import PrivacyConfig
 from datawhisper.core.decision_engine import HeuristicDecisionEngine
-from datawhisper.core.models import CatalogSnapshot, ColumnInfo, TableInfo
+from datawhisper.core.models import CatalogSnapshot, ColumnInfo, ForeignKeyInfo, TableInfo
 from datawhisper.core.privacy import PrivacyScrubber
 from datawhisper.core.schema_graph import SchemaGraph
 from datawhisper.core.security import validate_sql
@@ -70,8 +70,8 @@ def benchmark_hybrid_schema_pruning() -> float:
         TableInfo(
             name=f"table_{i}",
             columns=[
-                ColumnInfo(name="id", data_type="INTEGER", is_pk=True),
-                *[ColumnInfo(name=f"metric_{j}", data_type="REAL") for j in range(5)],
+                ColumnInfo(name="id", type="INTEGER", primary_key=True),
+                *[ColumnInfo(name=f"metric_{j}", type="REAL") for j in range(5)],
             ],
             row_count=1000,
         )
@@ -96,16 +96,24 @@ def benchmark_synthetic_generator() -> float:
             TableInfo(
                 name="parent",
                 columns=[
-                    ColumnInfo(name="id", data_type="INTEGER", is_pk=True),
-                    ColumnInfo(name="name", data_type="TEXT"),
+                    ColumnInfo(name="id", type="INTEGER", primary_key=True),
+                    ColumnInfo(name="name", type="TEXT"),
                 ],
             ),
             TableInfo(
                 name="child",
                 columns=[
-                    ColumnInfo(name="id", data_type="INTEGER", is_pk=True),
-                    ColumnInfo(name="parent_id", data_type="INTEGER", foreign_key="parent.id"),
-                    ColumnInfo(name="score", data_type="REAL"),
+                    ColumnInfo(name="id", type="INTEGER", primary_key=True),
+                    ColumnInfo(name="parent_id", type="INTEGER"),
+                    ColumnInfo(name="score", type="REAL"),
+                ],
+                foreign_keys=[
+                    ForeignKeyInfo(
+                        from_table="child",
+                        from_columns=["parent_id"],
+                        to_table="parent",
+                        to_columns=["id"],
+                    )
                 ],
             ),
         ],

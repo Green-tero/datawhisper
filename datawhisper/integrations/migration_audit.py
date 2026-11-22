@@ -105,18 +105,6 @@ def _strip_comment(text: str) -> str:
     return "".join(out)
 
 
-def _statement_indexed_columns(statement: exp.Expression) -> set[str]:
-    """Columns referenced by any CREATE INDEX within a parsed statement batch."""
-    columns: set[str] = set()
-    for create in statement.find_all(exp.Create):
-        if create.kind != "INDEX":
-            continue
-        index_node = create.this
-        for column in index_node.find_all(exp.Column):
-            columns.add(column.name.lower())
-    return columns
-
-
 def _collect_create_index_columns(text: str) -> set[tuple[str, str]]:
     """Lowercased (table, column) pairs: ``CREATE INDEX ... ON t (col)``."""
     indexed: set[tuple[str, str]] = set()
@@ -240,13 +228,15 @@ def _scan_alter_table(
                 )
 
         # Lock risk on column type rewrite:
-        act_sql = action.sql().upper()
-        if "TYPE" in act_sql or "SET DATA TYPE" in act_sql:
+        if isinstance(action, exp.AlterColumn) and (
+            action.args.get("dtype") is not None or action.find(exp.DataType) is not None
+        ):
             report.findings.append(
                 MigrationFinding(
                     kind="lock_risk",
-                    message=f"ALTER of '{table_name}' changes a column type, forcing "
-                    "a table rewrite",
+                    message=(
+                        f"ALTER of '{table_name}' changes a column type, forcing " "a table rewrite"
+                    ),
                     statement=statement.sql()[:160],
                 )
             )
