@@ -174,6 +174,18 @@ def test_cartesian_detection_accepts_real_joins() -> None:
         )
         == []
     )
+    assert (
+        detect_cartesian_joins(
+            "SELECT * FROM orders JOIN customers ON customer_id = customers.id", "sqlite"
+        )
+        == []
+    )
+    assert (
+        detect_cartesian_joins(
+            "SELECT * FROM orders JOIN customers ON orders.customer_id = id", "sqlite"
+        )
+        == []
+    )
 
 
 def test_cartesian_detection_handles_subquery_isolation() -> None:

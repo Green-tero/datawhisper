@@ -117,9 +117,9 @@ def _statement_indexed_columns(statement: exp.Expression) -> set[str]:
     return columns
 
 
-def _collect_create_index_columns(text: str) -> set[str]:
-    """Lowercased indexed columns: ``CREATE INDEX ... ON t (col)``."""
-    indexed: set[str] = set()
+def _collect_create_index_columns(text: str) -> set[tuple[str, str]]:
+    """Lowercased (table, column) pairs: ``CREATE INDEX ... ON t (col)``."""
+    indexed: set[tuple[str, str]] = set()
     try:
         statements = [s for s in sqlglot.parse(text) if s is not None]
     except sqlglot.errors.ParseError:
@@ -128,8 +128,10 @@ def _collect_create_index_columns(text: str) -> set[str]:
         if not isinstance(statement, exp.Create) or statement.kind != "INDEX":
             continue
         index_node = statement.this  # Index node: "idx ON orders (cols)"
+        table_node = statement.find(exp.Table)
+        table_name = table_node.name.lower() if table_node and table_node.name else ""
         for column in index_node.find_all(exp.Column):
-            indexed.add(column.name.lower())
+            indexed.add((table_name, column.name.lower()))
     return indexed
 
 
@@ -172,7 +174,7 @@ def analyze_migration_sql(
             if statement.kind == "TABLE":
                 _scan_create_table(statement, indexed_columns, high_traffic, report)
         elif isinstance(statement, exp.Alter) and statement.kind == "TABLE":
-            _scan_alter_table(statement, high_traffic, report, source)
+            _scan_alter_table(statement, high_traffic, report, source, indexed_columns)
         elif isinstance(statement, exp.Drop):
             kind = str(statement.args.get("kind") or "").lower()
             if kind in {"table", "index", "column"}:
@@ -189,7 +191,11 @@ def analyze_migration_sql(
 
 
 def _scan_alter_table(
-    statement: exp.Alter, high_traffic: set[str], report: MigrationReport, source: str
+    statement: exp.Alter,
+    high_traffic: set[str],
+    report: MigrationReport,
+    source: str,
+    indexed_columns: set[tuple[str, str]],
 ) -> None:
     table_node = statement.find(exp.Table)
     table_name = (table_node.name if table_node is not None else "").lower()
@@ -212,9 +218,16 @@ def _scan_alter_table(
             name = column_def.name.lower()
             has_fk = any(
                 isinstance(constraint, (exp.ForeignKey, exp.Reference))
+                or (
+                    isinstance(constraint, exp.ColumnConstraint)
+                    and isinstance(constraint.args.get("kind"), (exp.ForeignKey, exp.Reference))
+                )
                 for constraint in column_def.args.get("constraints") or []
             )
-            if has_fk and name not in _statement_indexed_columns(statement):
+            is_indexed = (table_name, name) in indexed_columns or any(
+                c == name for t, c in indexed_columns if not t
+            )
+            if has_fk and not is_indexed:
                 report.findings.append(
                     MigrationFinding(
                         kind="missing_fk_index",
@@ -225,26 +238,23 @@ def _scan_alter_table(
                         statement=statement.sql()[:160],
                     )
                 )
-    # Lock risk on any ADD COLUMN with a default or type rewrite: SQLite and
-    # Postgres both rewrite tables for some type changes.
-    for action in statement.args.get("actions") or []:
-        kind_node = action.args.get("kind") if isinstance(action, exp.ColumnDef) else None
-        if kind_node is not None:
-            kind = str(kind_node.sql()).upper()
-            if kind.startswith(("SET DATA TYPE", "TYPE")):
-                report.findings.append(
-                    MigrationFinding(
-                        kind="lock_risk",
-                        message=f"ALTER of '{table_name}' changes a column type, forcing "
-                        "a table rewrite",
-                        statement=statement.sql()[:160],
-                    )
+
+        # Lock risk on column type rewrite:
+        act_sql = action.sql().upper()
+        if "TYPE" in act_sql or "SET DATA TYPE" in act_sql:
+            report.findings.append(
+                MigrationFinding(
+                    kind="lock_risk",
+                    message=f"ALTER of '{table_name}' changes a column type, forcing "
+                    "a table rewrite",
+                    statement=statement.sql()[:160],
                 )
+            )
 
 
 def _scan_create_table(
     statement: exp.Create,
-    indexed_columns: set[str],
+    indexed_columns: set[tuple[str, str]],
     high_traffic: set[str],
     report: MigrationReport,
 ) -> None:
@@ -259,11 +269,18 @@ def _scan_create_table(
             constraint
             for constraint in constraints
             if isinstance(constraint, (exp.ForeignKey, exp.Reference))
+            or (
+                isinstance(constraint, exp.ColumnConstraint)
+                and isinstance(constraint.args.get("kind"), (exp.ForeignKey, exp.Reference))
+            )
         ]
         if not references:
             continue
         column_name = column_def.name.lower()
-        if column_name not in indexed_columns:
+        is_indexed = (table_name, column_name) in indexed_columns or any(
+            c == column_name for t, c in indexed_columns if not t
+        )
+        if not is_indexed:
             report.findings.append(
                 MigrationFinding(
                     kind="missing_fk_index",

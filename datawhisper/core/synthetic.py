@@ -23,6 +23,45 @@ class SyntheticConfig(BaseModel):
     seed: int = 42
 
 
+def _quote_ident(name: str) -> str:
+    """Safely quote a SQL identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _topological_sort_tables(tables: list[TableInfo]) -> list[TableInfo]:
+    """Sort tables topologically according to foreign key dependencies using Kahn's algorithm."""
+    table_map = {t.name.lower(): t for t in tables}
+    deps: dict[str, set[str]] = {t.name.lower(): set() for t in tables}
+    dependents: dict[str, set[str]] = {t.name.lower(): set() for t in tables}
+
+    for t in tables:
+        t_name = t.name.lower()
+        for fk in t.foreign_keys:
+            target = fk.to_table.lower()
+            if target in table_map and target != t_name:
+                deps[t_name].add(target)
+                dependents[target].add(t_name)
+
+    queue = [name for name, d in deps.items() if len(d) == 0]
+    sorted_names: list[str] = []
+
+    while queue:
+        node = queue.pop(0)
+        sorted_names.append(node)
+        for child in list(dependents.get(node, ())):
+            deps[child].discard(node)
+            if len(deps[child]) == 0:
+                queue.append(child)
+
+    # If cyclic dependencies exist, append remaining tables deterministically
+    for t in tables:
+        t_name = t.name.lower()
+        if t_name not in sorted_names:
+            sorted_names.append(t_name)
+
+    return [table_map[n] for n in sorted_names]
+
+
 class SyntheticDataGenerator:
     """Deterministic generator producing referentially valid mock tables from catalog schemas."""
 
@@ -104,8 +143,8 @@ class SyntheticDataGenerator:
         generated_pks: dict[str, list[Any]] = {}
         dataset: dict[str, list[list[Any]]] = {}
 
-        # Sort tables: parent tables (with fewer or zero FKs) generated before child tables
-        sorted_tables = sorted(catalog.tables, key=lambda t: len(t.foreign_keys))
+        # Sort tables: parent tables (referenced by FKs) generated before child tables
+        sorted_tables = _topological_sort_tables(list(catalog.tables))
 
         for table in sorted_tables:
             t_name = table.name.lower()
@@ -135,10 +174,16 @@ class SyntheticDataGenerator:
         # Create tables
         for table in catalog.tables:
             col_defs: list[str] = []
+            pk_cols = [col.name for col in table.columns if col.primary_key]
             for col in table.columns:
-                pk_mark = " PRIMARY KEY" if col.primary_key else ""
-                col_defs.append(f'"{col.name}" {col.type}{pk_mark}')
-            backend._conn.execute(f'CREATE TABLE "{table.name}" ({", ".join(col_defs)})')
+                pk_mark = " PRIMARY KEY" if col.primary_key and len(pk_cols) == 1 else ""
+                col_defs.append(f"{_quote_ident(col.name)} {col.type}{pk_mark}")
+            if len(pk_cols) > 1:
+                pk_clause = f"PRIMARY KEY ({', '.join(_quote_ident(c) for c in pk_cols)})"
+                col_defs.append(pk_clause)
+
+            q_table = _quote_ident(table.name)
+            backend._conn.execute(f"CREATE TABLE {q_table} ({', '.join(col_defs)})")
 
             # Insert rows
             t_name = table.name.lower()
@@ -146,7 +191,7 @@ class SyntheticDataGenerator:
             if rows:
                 placeholders = ", ".join("?" for _ in table.columns)
                 backend._conn.executemany(
-                    f'INSERT INTO "{table.name}" VALUES ({placeholders})',
+                    f"INSERT INTO {q_table} VALUES ({placeholders})",
                     rows,
                 )
         backend._conn.commit()

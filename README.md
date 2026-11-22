@@ -4,11 +4,11 @@ DataWhisper answers questions about your data and reviews database changes in pu
 
 It runs locally, works across SQLite, DuckDB, PostgreSQL, Parquet and JSONL, and treats the language model as untrusted: the model proposes SQL, while validation, cost limits, data contracts, and data masking stay in code you can inspect.
 
-**Current release: 1.5.5.** See [CHANGELOG.md](CHANGELOG.md).
+**Current release: 1.5.6.** See [CHANGELOG.md](CHANGELOG.md) · [Full Configuration Guide](docs/configuration.md) · [راهنمای فارسی](docs/README.fa.md).
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Release](https://img.shields.io/badge/release-1.5.5-blue)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![Release](https://img.shields.io/badge/release-1.5.6-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **Language / زبان:** open a section below. English is open by default.
@@ -36,7 +36,7 @@ No LangChain, no LlamaIndex. The agent is a small, deterministic ReAct loop in p
 
 ## What's new in 1.5
 
-| Area | Prior Releases (1.3–1.4) | 1.5 Series (Current: 1.5.5) |
+| Area | Prior Releases (1.3–1.4) | 1.5 Series (Current: 1.5.6) |
 | --- | --- | --- |
 | **Semantic Layer & Contracts** | Ad-hoc queries and prompt context | Declarative `SemanticCatalog`, `MetricDefinition`, `DimensionDefinition`, and `TableContract` with CLI verification (`datawhisper contract`) |
 | **Differential Privacy** | Hash, mask, tokenize, redact modes | Added $\epsilon$-$\delta$ Differential Privacy (`mode="differential_privacy"`) with calibrated Laplace noise injection and non-negative count bounding |
@@ -309,11 +309,23 @@ Measured on standard development hardware (Windows, Python 3.15, in-memory engin
 | --- | --- | --- |
 | **System-1 Decision** | Heuristic / ONNX intent & risk evaluation | **0.02 – 0.04 ms** |
 | **Semantic Firewall** | Fast regex & semantic token check | **0.02 ms** |
-| **sqlglot AST Validation** | Multi-table join, subquery & CTE parsing | **0.22 ms** |
-| **Hybrid Schema Pruning** | BM25 + Dense Hash Projection (60-table graph) | **1.12 ms** |
+| **sqlglot AST Validation** | Multi-table join, subquery & CTE parsing | **0.22 – 0.75 ms** |
+| **Hybrid Schema Pruning** | BM25 + Dense Hash Projection (50-table graph) | **1.20 ms** |
 | **Index Recommendation** | AST predicate extraction & dialect index generation | **0.35 ms** |
-| **PII Scrubbing** | 10,000 cells across 4 sensitive columns | **~0.38 s** |
-| **Full Quality Test Suite** | 177 unit & integration tests across 9 test suites | **~2.6 s** |
+| **PII Scrubbing** | 10,000 cells across 4 sensitive columns (fast-path) | **~53 ms** |
+| **Full Quality Test Suite** | 198 unit & integration tests across 12 test suites | **~3.3 s** |
+
+You can run reproducible benchmarks locally with:
+```bash
+python benchmarks/run_benchmarks.py
+```
+
+## Limitations & Non-Goals
+
+- **Read-Only Analytics:** DataWhisper is strictly designed for analytical data querying and database pull request governance. It intentionally rejects data-modifying statements (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`) in its default configuration. It is not an administrative database manager.
+- **Not an ETL / Data Transformation Engine:** DataWhisper is not an ETL orchestrator like dbt or Apache Airflow. It queries existing tables and verifies contracts rather than scheduling pipelines.
+- **Dense Hash Projection vs. Neural Embeddings:** Schema retrieval uses a 128-dimensional character-trigram hash projection alongside BM25. This provides fast, offline, and lightweight semantic matching without requiring gigabyte-sized neural embedding models or external vector databases.
+- **Defense in Depth:** While our AST sandbox enforces strict read-only execution, production database connections (especially PostgreSQL) should always use read-only credentials with server-side statement timeouts for layered security.
 
 ## Development
 
@@ -323,7 +335,7 @@ poetry install --with dev --extras "duckdb arrow postgres llm"
 pre-commit install
 
 # Run complete quality gates
-poetry run pytest -v          # 177 tests passing
+poetry run pytest -v          # 198 tests passing
 poetry run ruff check .       # linting & style enforcement
 poetry run black --check .    # code formatting
 poetry run mypy datawhisper   # strict static type analysis
@@ -335,6 +347,13 @@ The test suite covers:
 - Privacy & PII protection: Luhn validation, differential privacy Laplace clamping, and referential integrity under HMAC pseudonymization.
 - Semantic layer & contracts: Table contract rules (`NOT NULL`, `UNIQUE`, row count bounds), and business metric resolution.
 - Performance & pruning: 60-table graph retrieval, Dijkstra path caching, composite foreign keys, and synthetic data generation.
+
+## Documentation & References
+
+- [Full Configuration Guide](docs/configuration.md) — Comprehensive table of all environment variables (`DW_*`).
+- [Persian Documentation / راهنمای فارسی](docs/README.fa.md) — Complete Persian documentation and architectural details.
+- [Security Policy](SECURITY.md) — Vulnerability reporting and security invariants.
+- [Contributing Guide](CONTRIBUTING.md) — Guidelines for code style, tests, and PRs.
 
 ## License
 
@@ -367,7 +386,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## تازه‌های نسخه ۱.۵
 
-| قابلیت | نسخه‌های پیشین (۱.۳ تا ۱.۴) | سری ۱.۵ (نسخه کنونی: ۱.۵.۵) |
+| قابلیت | نسخه‌های پیشین (۱.۳ تا ۱.۴) | سری ۱.۵ (نسخه کنونی: ۱.۵.۶) |
 | --- | --- | --- |
 | **لایه معنایی و قراردادها** | کوئری‌های موردی بر اساس حدس مدل | لایه معنایی ساخت‌یافته (`SemanticCatalog`) و اعتبارسنجی رسمی قراردادهای داده با دستور `datawhisper contract` |
 | **حریم خصوصی دیفرانسیل** | حالت‌های هش، ماسک و حذف ساده | سازوکار پیشرفته Laplace با حفظ مرز پایین مقادیر شمارشی (`mode="differential_privacy"`) |
@@ -592,8 +611,8 @@ datawhisper ask "which customer spent the most on paid orders?" --source demo.sq
 | **اعتبارسنجی AST با sqlglot** | تحلیل ساختاری JOIN، CTE و ساب‌کوئری‌ها | **۰.۲۲ میلی‌ثانیه** |
 | **هرس هیبریدی اسکیما** | ترکیب BM25 و پروجکشن معنایی روی ۶۰ جدول | **۱.۱۲ میلی‌ثانیه** |
 | **پیشنهاد ایندکس** | استخراج شروط و تولید ایندکس متناسب با دیالکت | **۰.۳۵ میلی‌ثانیه** |
-| **پالایشگر داده‌های حساس (PII)** | ۱۰٬۰۰۰ سلول در ۴ ستون حساس | **حدود ۰.۳۸ ثانیه** |
-| **سوئیت کامل تست‌های کیفی** | ۱۷۷ تست واحد و یکپارچگی در ۹ ماژول تست | **حدود ۲.۶ ثانیه** |
+| **پالایشگر داده‌های حساس (PII)** | ۱۰٬۰۰۰ سلول در ۴ ستون حساس (مسیر سریع) | **حدود ۵۳ میلی‌ثانیه** |
+| **سوئیت کامل تست‌های کیفی** | ۱۹۸ تست واحد و یکپارچگی در ۱۲ ماژول تست | **حدود ۳.۳ ثانیه** |
 
 ## توسعه و تست
 
@@ -605,13 +624,20 @@ poetry install --with dev --extras "duckdb arrow postgres llm"
 pre-commit install
 
 # اجرای دروازه‌های کیفی
-poetry run pytest -v          # اجرای تمام ۱۷۷ تست
+poetry run pytest -v          # اجرای تمام ۱۹۸ تست
 poetry run ruff check .       # بررسی تطابق با قوانین لینتر
 poetry run black --check .    # بررسی استانداردهای فرمت کد
 poetry run mypy datawhisper   # بررسی استاتیک تایپ‌ها
 ```
 
 <div dir="rtl">
+
+## مستندات تفصیلی
+
+- [راهنمای کامل متغیرهای محیطی](docs/configuration.md)
+- [مستندات کامل فارسی](docs/README.fa.md)
+- [راهنمای مشارکت در پروژه](CONTRIBUTING.md)
+- [سیاست امنیت و گزارش آسیب‌پذیری](SECURITY.md)
 
 ## مجوز
 

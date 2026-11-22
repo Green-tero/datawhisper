@@ -72,3 +72,57 @@ def test_synthetic_in_memory_engine_execution(sample_catalog: CatalogSnapshot) -
             "GROUP BY c.id"
         )
         assert len(res_join.rows) == 10
+
+
+def test_synthetic_topological_chain_and_composite_pk() -> None:
+    # 3-tier chain: orgs -> departments (composite PK) -> employees
+    orgs = TableInfo(
+        name="orgs",
+        columns=[
+            ColumnInfo(name="id", type="INTEGER", primary_key=True),
+            ColumnInfo(name="name", type="TEXT"),
+        ],
+    )
+    departments = TableInfo(
+        name="departments",
+        columns=[
+            ColumnInfo(name="org_id", type="INTEGER", primary_key=True),
+            ColumnInfo(name="dept_id", type="INTEGER", primary_key=True),
+            ColumnInfo(name="dept_name", type="TEXT"),
+        ],
+        foreign_keys=[
+            ForeignKeyInfo(
+                from_table="departments",
+                from_columns=["org_id"],
+                to_table="orgs",
+                to_columns=["id"],
+            )
+        ],
+    )
+    employees = TableInfo(
+        name="employees",
+        columns=[
+            ColumnInfo(name="emp_id", type="INTEGER", primary_key=True),
+            ColumnInfo(name="dept_ref", type="INTEGER"),
+            ColumnInfo(name="email", type="TEXT"),
+        ],
+        foreign_keys=[
+            ForeignKeyInfo(
+                from_table="employees",
+                from_columns=["dept_ref"],
+                to_table="departments",
+                to_columns=["dept_id"],
+            )
+        ],
+    )
+
+    # Deliberately order tables in reverse dependency order
+    catalog = CatalogSnapshot(dialect="sqlite", tables=[employees, departments, orgs])
+    gen = SyntheticDataGenerator(SyntheticConfig(rows_per_table=5, seed=42))
+
+    # Engine creation verifies SQLite syntax for composite PK and topological insertion order
+    with gen.generate_in_memory_engine(catalog) as engine:
+        res = engine.execute("SELECT COUNT(*) FROM employees")
+        assert res.rows[0][0] == 5
+        res_dept = engine.execute("SELECT COUNT(*) FROM departments")
+        assert res_dept.rows[0][0] == 5

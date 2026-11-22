@@ -8,7 +8,7 @@ instead of re-deriving them.
 
 - **Product:** DataWhisper — local-first agentic database copilot and CI/CD
   database governance engine. Public repo: `Green-tero/datawhisper`.
-- **Release line:** 1.5.x (current release 1.5.5). Keep `pyproject.toml`,
+- **Release line:** 1.5.x (current release 1.5.6). Keep `pyproject.toml`,
   `datawhisper/__init__.py`, README badge and CHANGELOG in sync on every bump.
 - **Dual role:** interactive local CLI/dashboard AND an autonomous PR auditor
   GitHub Action. Both share the same core.
@@ -72,7 +72,7 @@ datawhisper/
 ## Testing & quality gates (required before pushing)
 
 ```bash
-poetry run pytest -v          # full suite (~140 tests)
+poetry run pytest -v          # full suite (198 tests)
 poetry run ruff check .       # clean
 poetry run black --check .    # clean
 poetry run mypy datawhisper   # strict, no issues
@@ -80,9 +80,8 @@ poetry run mypy datawhisper   # strict, no issues
 
 - Test with `pytest.importorskip` for `duckdb`/`pyarrow` optional deps.
 - Push path: `git push` to `main` after tests pass, plus an annotated tag
-  `v1.3.x`. CI runs on 3.11 and 3.12.
-- Credential: stored Windows Credential Manager entry for `Green-tero`
-  (scopes repo+workflow); no token in files or configs.
+  `v1.5.x`. CI runs on 3.11, 3.12, and 3.13.
+- Credential: standard Git / GitHub CLI auth credentials; no tokens in files or configs.
 
 ## Latency budget (measured headroom)
 

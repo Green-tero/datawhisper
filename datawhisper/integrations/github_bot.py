@@ -580,7 +580,18 @@ def format_audit_report(
         "before reporting</sub>"
     )
     report = "\n".join(lines)
-    return report[:_MAX_COMMENT_CHARS]
+    if len(report) > _MAX_COMMENT_CHARS:
+        truncated = report[: _MAX_COMMENT_CHARS - 150]
+        open_details = truncated.count("<details")
+        close_details = truncated.count("</details>")
+        missing_closes = "\n</details>" * max(0, open_details - close_details)
+        report = (
+            truncated
+            + f"\n\n... *(Report truncated to {_MAX_COMMENT_CHARS} chars)*"
+            + missing_closes
+            + "\n---\n<sub>Read-only sandboxed analysis • AST-validated SQL</sub>"
+        )
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -649,20 +660,30 @@ class GitHubClient:
         return response
 
     def list_pr_files(self, pr_number: int) -> list[PrFile]:
-        response = self._request(
-            "GET",
-            f"{self._api_base}/repos/{self._repo}/pulls/{pr_number}/files",
-            params={"per_page": "100"},
-        )
-        return [
-            PrFile(
-                filename=item["filename"],
-                status=item.get("status", "modified"),
-                additions=item.get("additions", 0),
-                deletions=item.get("deletions", 0),
+        page = 1
+        files: list[PrFile] = []
+        while True:
+            response = self._request(
+                "GET",
+                f"{self._api_base}/repos/{self._repo}/pulls/{pr_number}/files",
+                params={"per_page": "100", "page": str(page)},
             )
-            for item in response.json()
-        ]
+            items = response.json()
+            if not isinstance(items, list) or not items:
+                break
+            files.extend(
+                PrFile(
+                    filename=item["filename"],
+                    status=item.get("status", "modified"),
+                    additions=item.get("additions", 0),
+                    deletions=item.get("deletions", 0),
+                )
+                for item in items
+            )
+            if len(items) < 100:
+                break
+            page += 1
+        return files
 
     def get_file_content(self, path: str, ref: str) -> str:
         """Fetch raw content at a ref; 404 yields an empty baseline (new files)."""
@@ -680,13 +701,22 @@ class GitHubClient:
         return response.text
 
     def list_pr_comments(self, pr_number: int) -> list[dict[str, Any]]:
-        response = self._request(
-            "GET",
-            f"{self._api_base}/repos/{self._repo}/issues/{pr_number}/comments",
-            params={"per_page": "100"},
-        )
-        payload = response.json()
-        return payload if isinstance(payload, list) else []
+        page = 1
+        comments: list[dict[str, Any]] = []
+        while True:
+            response = self._request(
+                "GET",
+                f"{self._api_base}/repos/{self._repo}/issues/{pr_number}/comments",
+                params={"per_page": "100", "page": str(page)},
+            )
+            payload = response.json()
+            if not isinstance(payload, list) or not payload:
+                break
+            comments.extend(payload)
+            if len(payload) < 100:
+                break
+            page += 1
+        return comments
 
     def create_pr_comment(self, pr_number: int, body: str) -> None:
         self._request(

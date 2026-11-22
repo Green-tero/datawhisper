@@ -109,3 +109,26 @@ def test_data_contract_verification_detects_violations(engine: ExecutionEngine) 
     assert "not_null" in rule_types
     assert "allowed_values" in rule_types
     assert "row_count" in rule_types
+
+
+def test_data_contract_escaping_and_range_rule(engine: ExecutionEngine) -> None:
+    # Test single-quote escaping in allowed values and range rule
+    contract = TableContract(
+        table="customers",
+        rules=[
+            ContractRule(
+                column="country",
+                rule_type=ContractRuleType.ALLOWED_VALUES,
+                allowed_values=["O'Brien", "D'Souza", "US", "UK", "IR"],
+            ),
+            ContractRule(
+                column="id",
+                rule_type=ContractRuleType.RANGE,
+                min_value=1,
+                max_value=1000,
+            ),
+        ],
+    )
+    report = verify_table_contract(engine, contract)
+    assert report.passed
+    assert report.checked_rules == 2

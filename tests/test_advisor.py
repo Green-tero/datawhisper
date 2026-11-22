@@ -36,6 +36,13 @@ def test_index_advisor_handles_joins_and_composite_predicates() -> None:
     pg_sqls = [r.sql for r in report.recommendations]
     assert any("CONCURRENTLY" in s for s in pg_sqls)
 
+    # Must resolve alias 'o' to real table 'orders'
+    tables = [r.table for r in report.recommendations]
+    assert "orders" in tables
+    assert "o" not in tables
+    assert "c" not in tables
+    assert any('ON "orders"' in s for s in pg_sqls)
+
 
 def test_execution_engine_advise_query(engine: ExecutionEngine) -> None:
     sql = "SELECT * FROM customers WHERE email = 'ada@example.com'"

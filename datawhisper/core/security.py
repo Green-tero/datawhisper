@@ -253,25 +253,29 @@ class SemanticFirewall:
         return self._enforce(sql, "statement_mutation")
 
     def reasons_for(self, text: str) -> list[str]:
-        """Human-readable explanations for a rejection, derived from the rules."""
+        """Human-readable explanations for a rejection, derived from the canonical policy rules."""
+        from datawhisper.core.decision_engine import (
+            SHARED_DESTRUCTIVE_PATTERNS,
+            SHARED_INJECTION_PATTERNS,
+            SHARED_TENANT_PATTERN,
+        )
+
         lowered = text.lower()
         reasons: list[str] = []
-        injection = (
-            r"\bignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?)\b|"
-            r"\bdisregard\s+(all\s+)?(previous|prior|your)\b|"
-            r"\breveal\s+(your\s+)?(system\s+)?prompt\b|"
-            r"\bprint\s+(your\s+)?(system\s+)?prompt\b|"
-            r"\bjailbreak\b|\bdeveloper\s+mode\b|"
-            r"\bact\s+as\s+.{0,40}\bwithout\s+(any\s+)?restrictions\b|"
-            r"\bexfiltrate\b"
-        )
-        if re.search(injection, lowered):
-            reasons.append("input matches a prompt-injection signature")
-        if re.search(r"\b(drop|truncate)\s+(table|database|schema|index)\b", lowered):
-            reasons.append("destructive DDL detected (DROP/TRUNCATE)")
-        if re.search(r"\bdelete\s+from\s+\w+\s*(;|$)", lowered):
-            reasons.append("unbounded DELETE detected")
-        if re.search(r"\b(other|all|every)\s+tenants?\b|\bcross[-\s]tenant\b", lowered):
+        for pat, _ in SHARED_INJECTION_PATTERNS:
+            if re.search(pat, lowered):
+                reasons.append("input matches a prompt-injection signature")
+                break
+        for pat, _ in SHARED_DESTRUCTIVE_PATTERNS:
+            if re.search(pat, lowered):
+                if "drop" in pat or "truncate" in pat:
+                    reasons.append("destructive DDL detected (DROP/TRUNCATE)")
+                elif "delete" in pat:
+                    reasons.append("unbounded DELETE detected")
+                else:
+                    reasons.append("unauthorized mutation statement detected")
+                break
+        if re.search(SHARED_TENANT_PATTERN, lowered):
             reasons.append("cross-tenant access pattern detected")
         return reasons
 
@@ -632,6 +636,14 @@ def detect_cartesian_joins(sql: str, dialect: str = "sqlite") -> list[list[str]]
                     ordered = sorted(linked)
                     for alias in ordered[1:]:
                         union.union(ordered[0], alias)
+                elif len(linked) == 1 and joined in scope:
+                    alias = next(iter(linked))
+                    if alias != joined:
+                        union.union(alias, joined)
+                    elif previous and previous in scope:
+                        union.union(previous, joined)
+                elif len(linked) == 0 and previous and previous in scope and joined in scope:
+                    union.union(previous, joined)
             elif (
                 (join.args.get("using") or join.args.get("method") == "NATURAL")
                 and previous in scope

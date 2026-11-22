@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.5.6] - 2026-11-22
+
+### Fixed & Hardened
+
+- **CI Workflow Matrix Bug**: Fixed Cartesian product expansion in `.github/workflows/ci.yml` that previously generated 16 failing jobs across nonexistent/unsupported Python runtimes. Standardized CI matrix to Python 3.11, 3.12, and 3.13.
+- **Data Contract SQL Injection Hardening**: Implemented strict identifier quoting (`_quote_ident`) and literal sanitization (`_sql_lit`) in `verify_table_contract()` (`semantic.py`) to safely handle table/column names and values with single quotes (e.g., `"O'Brien"`).
+- **Topological Sorting in Synthetic Data Generator**: Replaced naive foreign key count sorting with Kahn's topological sort algorithm (`_topological_sort_tables`), ensuring parent tables are always generated before dependent child tables, and added composite primary key support.
+- **Differential Privacy Environment Activation**: Added `"differential_privacy"` to recognized choices in `PrivacyConfig.from_env()`, allowing `DW_PII_MODE=differential_privacy` to be activated directly via environment variables.
+- **PostgreSQL Catalog Safety**: Initialized `row_count` before executing catalog queries in `PostgresBackend.introspect()`, filtered by `schema_name`, and retrieved primary key constraints from `information_schema.table_constraints`.
+- **Index Advisor Alias Resolution & Plan Integration**: Resolved table aliases to actual table names in `IndexAdvisor` before generating DDL, and inspected `PlanNode` properties to accurately factor sequential scans into estimated cost reductions.
+- **Cartesian Join False-Positive Fix**: Fixed false-positive Cartesian join rejection for unaliased columns in `ON` clauses (`orders JOIN customers ON customer_id = customers.id`).
+- **Migration Audit Scoping & Detection**: Scoped foreign key index checks to `(table_name, column_name)` pairs and correctly inspected `ColumnConstraint` reference kinds for both `ALTER` and `CREATE TABLE`.
+- **DuckDB Graceful Cancellation**: Replaced abrupt connection closing in `DuckDBBackend.cancel()` with non-destructive native `self._conn.interrupt()`.
+- **PII Scrubbing Latency Fast-Path**: Converted `PiiMatch` to `@dataclass(slots=True)` and added fast-path substring and digit checks in `detect_pii()`, reducing per-cell scanning time by ~85%.
+- **GitHub Bot Reliability**: Added pagination to PR file and comment listing in `github_bot.py` and safe Markdown comment truncation that preserves unclosed `<details>` tags.
+
+### Added
+
+- **2026 Model & SDK Updates**: Modernized `GeminiProvider` to support the official `google-genai` client without global process state, defaulting to `gemini-2.5-flash`.
+- **Comprehensive Test Suite**: Added 21 new tests across CLI commands, configuration parsing, and migration audits, bringing the total suite to **198 passing tests**.
+- **Standard Project Files & Docs**: Added `SECURITY.md`, `CONTRIBUTING.md`, `benchmarks/run_benchmarks.py`, `examples/demo_schema.sql`, `examples/sample_contract.py`, `docs/configuration.md`, and dedicated Persian documentation at `docs/README.fa.md`.
+
 ## [1.5.5] - 2026-11-21
 
 ### Fixed & Hardened

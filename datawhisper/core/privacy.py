@@ -31,10 +31,9 @@ import random
 import re
 import secrets
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
-
-from pydantic import BaseModel
 
 from datawhisper.core.config import PrivacyConfig
 from datawhisper.core.decision_engine import DecisionEngine
@@ -55,7 +54,8 @@ class PiiCategory(StrEnum):
     IP_ADDRESS = "IP_ADDRESS"
 
 
-class PiiMatch(BaseModel):
+@dataclass(slots=True)
+class PiiMatch:
     """A detected sensitive span inside one value."""
 
     category: PiiCategory
@@ -179,52 +179,83 @@ def detect_pii(value: str) -> list[PiiMatch]:
         return []
 
     candidates: list[PiiMatch] = []
-    for pattern, category in (
-        (_JWT, PiiCategory.JWT),
-        (_API_KEY, PiiCategory.API_KEY),
-        (_SSN, PiiCategory.SSN),
-        (_EMAIL, PiiCategory.EMAIL),
-    ):
-        for match in pattern.finditer(value):
+
+    # Fast path: evaluate regexes only if required structural substrings or digits exist
+    if "eyJ" in value:
+        for match in _JWT.finditer(value):
             candidates.append(
                 PiiMatch(
-                    category=category,
+                    category=PiiCategory.JWT,
                     value=match.group(0),
                     start=match.start(),
                     end=match.end(),
                 )
             )
 
-    for match in _CARD_CANDIDATE.finditer(value):
-        if _card_match(match.group(0)):
+    if any(k in value for k in ("sk-", "AKIA", "ghp_", "AIza")):
+        for match in _API_KEY.finditer(value):
             candidates.append(
                 PiiMatch(
-                    category=PiiCategory.CREDIT_CARD,
+                    category=PiiCategory.API_KEY,
                     value=match.group(0),
                     start=match.start(),
                     end=match.end(),
                 )
             )
 
-    for match in _PHONE.finditer(value):
-        candidates.append(
-            PiiMatch(
-                category=PiiCategory.PHONE,
-                value=match.group(0),
-                start=match.start(),
-                end=match.end(),
+    if "@" in value:
+        for match in _EMAIL.finditer(value):
+            candidates.append(
+                PiiMatch(
+                    category=PiiCategory.EMAIL,
+                    value=match.group(0),
+                    start=match.start(),
+                    end=match.end(),
+                )
             )
-        )
 
-    for match in _IP.finditer(value):
-        candidates.append(
-            PiiMatch(
-                category=PiiCategory.IP_ADDRESS,
-                value=match.group(0),
-                start=match.start(),
-                end=match.end(),
+    if any(ch.isdigit() for ch in value):
+        for match in _SSN.finditer(value):
+            candidates.append(
+                PiiMatch(
+                    category=PiiCategory.SSN,
+                    value=match.group(0),
+                    start=match.start(),
+                    end=match.end(),
+                )
             )
-        )
+
+        for match in _CARD_CANDIDATE.finditer(value):
+            if _card_match(match.group(0)):
+                candidates.append(
+                    PiiMatch(
+                        category=PiiCategory.CREDIT_CARD,
+                        value=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                    )
+                )
+
+        for match in _PHONE.finditer(value):
+            candidates.append(
+                PiiMatch(
+                    category=PiiCategory.PHONE,
+                    value=match.group(0),
+                    start=match.start(),
+                    end=match.end(),
+                )
+            )
+
+        if "." in value:
+            for match in _IP.finditer(value):
+                candidates.append(
+                    PiiMatch(
+                        category=PiiCategory.IP_ADDRESS,
+                        value=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                    )
+                )
 
     candidates.sort(key=lambda m: (m.start, -(m.end - m.start)))
     accepted: list[PiiMatch] = []

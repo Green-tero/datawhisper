@@ -165,18 +165,37 @@ class DataContractReport(BaseModel):
     violations: list[ContractViolation] = Field(default_factory=list)
 
 
+def _quote_ident(name: str) -> str:
+    """Safely quote a SQL identifier with double quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _sql_lit(value: Any) -> str:
+    """Safely format a scalar value as a SQL literal."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def verify_table_contract(engine: ExecutionEngine, contract: TableContract) -> DataContractReport:
     """Execute non-destructive verification queries against an engine for a table contract."""
     violations: list[ContractViolation] = []
     checked = 0
     table = contract.table
+    q_table = _quote_ident(table)
 
     for rule in contract.rules:
         checked += 1
         rtype = rule.rule_type
 
         if rtype == ContractRuleType.ROW_COUNT:
-            sql = f'SELECT COUNT(*) FROM "{table}"'
+            sql = f"SELECT COUNT(*) FROM {q_table}"
             count = int(engine.execute(sql).rows[0][0])
             if rule.min_rows is not None and count < rule.min_rows:
                 violations.append(
@@ -201,7 +220,8 @@ def verify_table_contract(engine: ExecutionEngine, contract: TableContract) -> D
 
         elif rtype == ContractRuleType.NOT_NULL:
             col = rule.column
-            sql = f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" IS NULL'
+            q_col = _quote_ident(col)
+            sql = f"SELECT COUNT(*) FROM {q_table} WHERE {q_col} IS NULL"
             null_count = int(engine.execute(sql).rows[0][0])
             if null_count > 0:
                 violations.append(
@@ -216,10 +236,11 @@ def verify_table_contract(engine: ExecutionEngine, contract: TableContract) -> D
 
         elif rtype == ContractRuleType.UNIQUE:
             col = rule.column
+            q_col = _quote_ident(col)
             sql = (
                 f"SELECT COUNT(*) FROM ("
-                f'SELECT "{col}" FROM "{table}" WHERE "{col}" IS NOT NULL '
-                f'GROUP BY "{col}" HAVING COUNT(*) > 1) s'
+                f"SELECT {q_col} FROM {q_table} WHERE {q_col} IS NOT NULL "
+                f"GROUP BY {q_col} HAVING COUNT(*) > 1) s"
             )
             dup_count = int(engine.execute(sql).rows[0][0])
             if dup_count > 0:
@@ -238,14 +259,15 @@ def verify_table_contract(engine: ExecutionEngine, contract: TableContract) -> D
 
         elif rtype == ContractRuleType.RANGE:
             col = rule.column
+            q_col = _quote_ident(col)
             clauses: list[str] = []
             if rule.min_value is not None:
-                clauses.append(f'"{col}" < {rule.min_value}')
+                clauses.append(f"{q_col} < {_sql_lit(rule.min_value)}")
             if rule.max_value is not None:
-                clauses.append(f'"{col}" > {rule.max_value}')
+                clauses.append(f"{q_col} > {_sql_lit(rule.max_value)}")
             if clauses:
                 cond = " OR ".join(clauses)
-                sql = f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" IS NOT NULL AND ({cond})'
+                sql = f"SELECT COUNT(*) FROM {q_table} WHERE {q_col} IS NOT NULL AND ({cond})"
                 out_of_bounds = int(engine.execute(sql).rows[0][0])
                 if out_of_bounds > 0:
                     bounds = f"[{rule.min_value}, {rule.max_value}]"
@@ -264,14 +286,13 @@ def verify_table_contract(engine: ExecutionEngine, contract: TableContract) -> D
 
         elif rtype == ContractRuleType.ALLOWED_VALUES:
             col = rule.column
+            q_col = _quote_ident(col)
             allowed = rule.allowed_values or []
             if allowed:
-                formatted_values = ", ".join(
-                    f"'{v}'" if isinstance(v, str) else str(v) for v in allowed
-                )
+                formatted_values = ", ".join(_sql_lit(v) for v in allowed)
                 sql = (
-                    f'SELECT COUNT(*) FROM "{table}" '
-                    f'WHERE "{col}" IS NOT NULL AND "{col}" NOT IN ({formatted_values})'
+                    f"SELECT COUNT(*) FROM {q_table} "
+                    f"WHERE {q_col} IS NOT NULL AND {q_col} NOT IN ({formatted_values})"
                 )
                 disallowed_count = int(engine.execute(sql).rows[0][0])
                 if disallowed_count > 0:

@@ -164,7 +164,7 @@ class LLMConfig(BaseModel):
     def resolve_model(self) -> str:
         if self.model:
             return self.model
-        return "gemini-2.0-flash" if self.provider == "gemini" else "gpt-4o-mini"
+        return "gemini-2.5-flash" if self.provider == "gemini" else "gpt-4o-mini"
 
 
 class GitHubConfig(BaseModel):
@@ -234,7 +234,9 @@ class DataWhisperConfig(BaseModel):
             return value if value in options else default
 
         mode = _choice(
-            "DW_PII_MODE", "hash", {"hash", "mask", "tokenize", "redact", "pseudonymize"}
+            "DW_PII_MODE",
+            "hash",
+            {"hash", "mask", "tokenize", "redact", "pseudonymize", "differential_privacy"},
         )
         plan_policy = _choice(
             "DW_PLAN_FAILURE_POLICY", "allow_with_budget", {"allow_with_budget", "reject"}
@@ -313,6 +315,8 @@ class DataWhisperConfig(BaseModel):
                 max_context_tokens=_int("DW_GRAPH_MAX_TOKENS", 1500),
                 bm25_k1=_float("DW_BM25_K1", 1.5),
                 bm25_b=_float("DW_BM25_B", 0.75),
+                domain_pruning=_bool("DW_DOMAIN_PRUNING", True),
+                max_domains=_int("DW_MAX_DOMAINS", 3),
                 subgraph_isolation_threshold=_int("DW_GRAPH_SUBGRAPH_THRESHOLD", 50),
                 weighted_dijkstra=_bool("DW_GRAPH_WEIGHTED_DIJKSTRA", True),
                 implicit_relations=_bool("DW_GRAPH_IMPLICIT_RELATIONS", True),

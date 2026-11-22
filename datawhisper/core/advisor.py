@@ -63,6 +63,19 @@ class IndexAdvisor:
                 summary="Unable to parse SQL for index advisory.",
             )
 
+        # Map table aliases to real canonical table names
+        alias_map: dict[str, str] = {}
+        target_tables: list[str] = [t.name.lower() for t in (catalog.tables if catalog else [])]
+
+        for tbl in parsed.find_all(exp.Table):
+            if tbl.name:
+                real_name = tbl.name.lower()
+                alias_map[real_name] = real_name
+                if real_name not in target_tables:
+                    target_tables.append(real_name)
+                if tbl.alias:
+                    alias_map[tbl.alias.lower()] = real_name
+
         # Collect columns used in WHERE predicates and JOIN ON conditions grouped by table
         filter_cols: dict[str, list[str]] = {}
         join_cols: dict[str, list[str]] = {}
@@ -72,7 +85,8 @@ class IndexAdvisor:
         where_node = parsed.find(exp.Where)
         if where_node:
             for col in where_node.find_all(exp.Column):
-                t_name = (col.table or "").lower()
+                raw_t = (col.table or "").lower()
+                t_name = alias_map.get(raw_t, raw_t)
                 c_name = col.name.lower()
                 if c_name and c_name not in {"*", "count"}:
                     filter_cols.setdefault(t_name, []).append(c_name)
@@ -82,7 +96,8 @@ class IndexAdvisor:
             on_clause = join.args.get("on")
             if on_clause:
                 for col in on_clause.find_all(exp.Column):
-                    t_name = (col.table or "").lower()
+                    raw_t = (col.table or "").lower()
+                    t_name = alias_map.get(raw_t, raw_t)
                     c_name = col.name.lower()
                     if c_name:
                         join_cols.setdefault(t_name, []).append(c_name)
@@ -91,18 +106,11 @@ class IndexAdvisor:
         order_node = parsed.find(exp.Order)
         if order_node:
             for col in order_node.find_all(exp.Column):
-                t_name = (col.table or "").lower()
+                raw_t = (col.table or "").lower()
+                t_name = alias_map.get(raw_t, raw_t)
                 c_name = col.name.lower()
                 if c_name:
                     order_cols.setdefault(t_name, []).append(c_name)
-
-        # Resolve tables from catalog if table names were unaliased/unspecified
-        target_tables = [t.name.lower() for t in (catalog.tables if catalog else [])]
-        if not target_tables:
-            # Fallback to tables referenced in FROM / JOIN
-            for tbl in parsed.find_all(exp.Table):
-                if tbl.name:
-                    target_tables.append(tbl.name.lower())
 
         recommendations: list[IndexRecommendation] = []
         seen_signatures: set[tuple[str, tuple[str, ...]]] = set()
@@ -175,9 +183,25 @@ class IndexAdvisor:
             else:
                 create_sql = f'CREATE INDEX "{idx_name}" ON "{tbl_name}" ({cols_str});'
 
+            # If explain plan shows a full scan on this table, increase estimated cost reduction
+            is_full_scan = False
+            if plan and plan.full_scans:
+                is_full_scan = any(
+                    (s.table and tbl_name == s.table.lower())
+                    or (s.detail and tbl_name in s.detail.lower())
+                    for s in plan.full_scans
+                )
+
             reduction = 85.0 if len(col_tuple) > 1 else 70.0
+            if is_full_scan:
+                reduction = min(95.0, reduction + 10.0)
+
             cols_desc = ", ".join(col_tuple)
-            reason = f"Covers predicate/join filters on {cols_desc} to replace sequential scan"
+            scan_note = " (full table scan identified in execution plan)" if is_full_scan else ""
+            reason = (
+                f"Covers predicate/join filters on {cols_desc} to replace sequential "
+                f"scan{scan_note}"
+            )
 
             recommendations.append(
                 IndexRecommendation(

@@ -309,8 +309,9 @@ class SQLiteBackend:
                     entry.to_columns.append(str(fk[4]))
             foreign_keys = list(grouped.values())
             system = table_name.startswith("sqlite_")
+            is_view = str(kind) == "view"
             row_count: int | None = None
-            if not system:
+            if not system and not is_view:
                 with contextlib.suppress(sqlite3.Error):
                     count_rows = self._conn.execute(
                         f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
@@ -322,7 +323,7 @@ class SQLiteBackend:
                     columns=columns,
                     row_count=row_count,
                     foreign_keys=foreign_keys,
-                    is_view=str(kind) == "view",
+                    is_view=is_view,
                 )
             )
         return snapshot
@@ -568,27 +569,32 @@ class DuckDBBackend:
                 for row in column_rows
             ]
             row_count: int | None = None
-            with contextlib.suppress(Exception):
-                # fetchall (not fetchone): DuckDB keeps a result "unfinished"
-                # until a fetch returns no rows, which would poison the next
-                # statement on this connection.
-                count_rows = self._conn.execute(
-                    f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
-                ).fetchall()
-                row_count = int(count_rows[0][0])
+            is_view = str(kind).upper() == "VIEW"
+            if not is_view:
+                with contextlib.suppress(Exception):
+                    # fetchall (not fetchone): DuckDB keeps a result "unfinished"
+                    # until a fetch returns no rows, which would poison the next
+                    # statement on this connection.
+                    count_rows = self._conn.execute(
+                        f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+                    ).fetchall()
+                    row_count = int(count_rows[0][0])
             snapshot.tables.append(
                 TableInfo(
                     name=table_name,
                     columns=columns,
                     row_count=row_count,
                     foreign_keys=foreign_keys.get(table_name, []),
-                    is_view=str(kind).upper() == "VIEW",
+                    is_view=is_view,
                 )
             )
         return snapshot
 
     def cancel(self) -> None:
-        # DuckDB 2.x has no cross-thread interrupt; closing abandons the query.
+        if hasattr(self._conn, "interrupt"):
+            with contextlib.suppress(Exception):
+                self._conn.interrupt()
+                return
         self._closed = True
         with contextlib.suppress(Exception):
             self._conn.close()
@@ -691,19 +697,36 @@ class PostgresBackend:
     def introspect(self) -> CatalogSnapshot:
         snapshot = CatalogSnapshot(dialect=self.dialect)
         relations = self._conn.execute(
-            "SELECT table_name, table_type FROM information_schema.tables "
+            "SELECT table_name, table_type, table_schema FROM information_schema.tables "
             "WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_name"
         ).fetchall()
-        for name, kind in relations:
+        for name, kind, schema in relations:
             table_name = str(name)
+            schema_name = str(schema)
+            pk_set: set[str] = set()
+            with contextlib.suppress(Exception):
+                pk_rows = self._conn.execute(
+                    "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+                    "JOIN information_schema.key_column_usage kcu "
+                    "ON tc.constraint_name = kcu.constraint_name "
+                    "AND tc.table_schema = kcu.table_schema "
+                    "WHERE tc.constraint_type = 'PRIMARY KEY' "
+                    "AND tc.table_name = %s AND tc.table_schema = %s",
+                    (table_name, schema_name),
+                ).fetchall()
+                pk_set = {str(r[0]) for r in pk_rows}
+
             column_rows = self._conn.execute(
                 "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-                "WHERE table_name = %s ORDER BY ordinal_position",
-                (table_name,),
+                "WHERE table_name = %s AND table_schema = %s ORDER BY ordinal_position",
+                (table_name, schema_name),
             ).fetchall()
             columns = [
                 ColumnInfo(
-                    name=str(row[0]), type=str(row[1]), nullable=str(row[2]).upper() == "YES"
+                    name=str(row[0]),
+                    type=str(row[1]),
+                    nullable=str(row[2]).upper() == "YES",
+                    primary_key=str(row[0]) in pk_set,
                 )
                 for row in column_rows
             ]
@@ -714,10 +737,13 @@ class PostgresBackend:
                     "FROM information_schema.table_constraints tc "
                     "JOIN information_schema.key_column_usage kcu "
                     "ON tc.constraint_name = kcu.constraint_name "
+                    "AND tc.table_schema = kcu.table_schema "
                     "JOIN information_schema.constraint_column_usage ccu "
                     "ON tc.constraint_name = ccu.constraint_name "
-                    "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = %s",
-                    (table_name,),
+                    "AND tc.table_schema = ccu.table_schema "
+                    "WHERE tc.constraint_type = 'FOREIGN KEY' "
+                    "AND tc.table_name = %s AND tc.table_schema = %s",
+                    (table_name, schema_name),
                 ).fetchall()
                 keys = [
                     ForeignKeyInfo(
@@ -728,12 +754,16 @@ class PostgresBackend:
                     )
                     for row in key_rows
                 ]
+            row_count: int | None = None
             with contextlib.suppress(Exception):
-                row_count = int(
-                    self._conn.execute(
-                        "SELECT reltuples::bigint FROM pg_class WHERE relname = %s", (table_name,)
-                    ).fetchone()[0]
-                )
+                res = self._conn.execute(
+                    "SELECT c.reltuples::bigint FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE c.relname = %s AND n.nspname = %s",
+                    (table_name, schema_name),
+                ).fetchone()
+                if res is not None and res[0] is not None and res[0] >= 0:
+                    row_count = int(res[0])
             snapshot.tables.append(
                 TableInfo(
                     name=table_name,

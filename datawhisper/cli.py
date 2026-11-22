@@ -86,7 +86,7 @@ def _open_engine(source: str, config: DataWhisperConfig) -> ExecutionEngine:
         raise typer.Exit(code=2) from exc
 
 
-def _print_agent_result(result: AgentResult) -> None:
+def _print_agent_result(result: AgentResult, config: DataWhisperConfig | None = None) -> None:
     if result.pruned_tables:
         console.print(
             f"[dim]context: {len(result.pruned_tables)} tables · "
@@ -120,7 +120,8 @@ def _print_agent_result(result: AgentResult) -> None:
         )
     )
     if result.sql:
-        scrubber = PrivacyScrubber(DataWhisperConfig.from_env().privacy)
+        cfg = config or DataWhisperConfig.from_env()
+        scrubber = PrivacyScrubber(cfg.privacy)
         safe_sql = scrubber.scrub_text(result.sql)[0]
         console.print(Panel(safe_sql, title="final SQL", border_style="blue"))
 
@@ -165,8 +166,14 @@ def version() -> None:
 @app.command()
 def ask(
     question: Annotated[str, typer.Argument(help="Natural-language analytics question.")],
-    db: Annotated[
-        str, typer.Option("--db", help="SQLite/DuckDB/Parquet/JSONL/CSV path or Postgres DSN.")
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            "--db",
+            "-s",
+            help="Data source path (.sqlite, .duckdb, .parquet, postgres://).",
+        ),
     ],
     explain_only: Annotated[
         bool,
@@ -177,7 +184,7 @@ def ask(
 ) -> None:
     """Run the self-correcting agent against a dataset."""
     config = DataWhisperConfig.from_env()
-    engine = _open_engine(db, config)
+    engine = _open_engine(source, config)
     try:
         catalog = engine.introspect()
         pruned = SchemaGraph(catalog, config.schema_graph).retrieve(
@@ -212,7 +219,7 @@ def ask(
         agent = DataWhisperAgent(engine, provider, config)
         with console.status("[bold cyan]datawhisper agent thinking...", spinner="dots"):
             result = agent.run(question)
-        _print_agent_result(result)
+        _print_agent_result(result, config)
         raise typer.Exit(code=0 if result.success else 1)
     finally:
         engine.close()
@@ -221,11 +228,19 @@ def ask(
 @app.command()
 def explain(
     sql: Annotated[str, typer.Argument(help="Read-only SQL statement to explain.")],
-    db: Annotated[str, typer.Option("--db", help="Data source path or DSN.")],
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            "--db",
+            "-s",
+            help="Data source path (.sqlite, .duckdb, .parquet, postgres://).",
+        ),
+    ],
 ) -> None:
     """Dry-run a statement through the sandbox and cost gate (no execution)."""
     config = DataWhisperConfig.from_env()
-    engine = _open_engine(db, config)
+    engine = _open_engine(source, config)
     try:
         try:
             plan, decision = engine.explain(sql)
@@ -240,7 +255,15 @@ def explain(
 
 @app.command()
 def inspect(
-    db: Annotated[str, typer.Option("--db", help="Data source path or DSN.")],
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            "--db",
+            "-s",
+            help="Data source path (.sqlite, .duckdb, .parquet, postgres://).",
+        ),
+    ],
     profile: Annotated[str | None, typer.Option(help="Profile 'table.column'.")] = None,
     graph: Annotated[
         str | None, typer.Option(help="Show the pruned schema for this question.")
@@ -248,7 +271,7 @@ def inspect(
 ) -> None:
     """Print the catalog, profile a column, or preview schema pruning."""
     config = DataWhisperConfig.from_env()
-    engine = _open_engine(db, config)
+    engine = _open_engine(source, config)
     try:
         catalog = engine.introspect()
         if graph:
@@ -310,7 +333,15 @@ def inspect(
 
 @app.command()
 def dashboard(
-    db: Annotated[str, typer.Option("--db", help="Data source path or DSN.")],
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            "--db",
+            "-s",
+            help="Data source path (.sqlite, .duckdb, .parquet, postgres://).",
+        ),
+    ],
     output: Annotated[Path, typer.Option("--output", "-o", help="HTML output path.")] = Path(
         "datawhisper_dashboard.html"
     ),
@@ -322,7 +353,7 @@ def dashboard(
 ) -> None:
     """Generate a standalone dark-mode dashboard with auto-detected charts."""
     config = DataWhisperConfig.from_env()
-    engine = _open_engine(db, config)
+    engine = _open_engine(source, config)
     try:
         catalog = engine.introspect()
         total_rows = sum(t.row_count or 0 for t in catalog.tables)
@@ -372,7 +403,7 @@ def dashboard(
         html = render_report_html(
             title="DataWhisper Dashboard",
             subtitle=(
-                f"generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} • {db} • "
+                f"generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} • {source} • "
                 f"PII: {redaction_groups} redaction group(s)"
             ),
             blocks=blocks,
