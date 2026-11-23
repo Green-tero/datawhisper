@@ -33,7 +33,7 @@
 
 ## راه‌اندازی سریع
 
-نیازمند **پایتون ۳.۱۱، ۳.۱۲ یا ۳.۱۳**:
+نیازمند **پایتون ۳.۱۳، ۳.۱۴ یا ۳.۱۵**:
 
 ```bash
 git clone https://github.com/Green-tero/datawhisper.git
