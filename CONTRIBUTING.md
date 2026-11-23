@@ -9,7 +9,7 @@ DataWhisper is a local-first tabular data assistant and PR governance auditor wi
 ## 1. Development Setup
 
 ### Prerequisites
-- Python 3.11, 3.12, or 3.13
+- Python 3.13, 3.14, or 3.15
 - [Poetry](https://python-poetry.org/)
 
 ### Clone & Install
@@ -31,7 +31,7 @@ poetry run pre-commit install
 All contributions must pass our standard quality checks before being merged:
 
 ```bash
-# 1. Run the full test suite (198 tests)
+# 1. Run the full test suite (206 tests)
 poetry run pytest -v
 
 # 2. Run Ruff linting

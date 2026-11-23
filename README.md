@@ -5,7 +5,7 @@ DataWhisper is a local data analysis tool and CI/CD pull request auditor for rel
 It runs locally against SQLite, DuckDB, PostgreSQL, Parquet, and JSONL. It treats language models as untrusted: the model drafts SQL, while syntax validation, execution limits, data contracts, and data masking remain in deterministic code you can inspect.
 
 [![CI](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml/badge.svg)](https://github.com/Green-tero/datawhisper/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![Python](https://img.shields.io/badge/python-3.13%20%7C%203.14%20%7C%203.15-blue)
 ![Release](https://img.shields.io/badge/release-1.5.9-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
@@ -88,7 +88,7 @@ flowchart LR
 
 ## Quickstart
 
-Requires **Python 3.11, 3.12, or 3.13**:
+Requires **Python 3.13, 3.14, or 3.15**:
 
 ```bash
 git clone https://github.com/Green-tero/datawhisper.git

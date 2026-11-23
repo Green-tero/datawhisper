@@ -80,7 +80,7 @@ poetry run mypy datawhisper   # strict, no issues
 
 - Test with `pytest.importorskip` for `duckdb`/`pyarrow` optional deps.
 - Push path: `git push` to `main` after tests pass, plus an annotated tag
-  `v1.5.x`. CI runs on 3.11, 3.12, and 3.13.
+  `v1.5.x`. Target environments: Python 3.13, 3.14, and 3.15.
 - Credential: standard Git / GitHub CLI auth credentials; no tokens in files or configs.
 
 ## Latency budget (measured headroom)

@@ -40,7 +40,7 @@ All settings in DataWhisper can be configured via environment variables (`DW_*`)
 | `DW_MAX_ESTIMATED_ROWS` | int | `500000` | Maximum estimated rows scanned allowed by the query planner before rejecting execution. |
 | `DW_REJECT_CARTESIAN` | bool | `true` | Rejects unconstrained Cartesian joins (`CROSS JOIN` or multiple `FROM` tables without join predicates). |
 | `DW_EXECUTION_TIMEOUT_SECONDS` | float | `30.0` | Hard query execution timeout before interrupting the driver. |
-| `DW_MAX_REPAIR_ATTEMPTS` | int | `3` | Maximum autonomous SQL self-correction attempts during the ReAct loop. |
+| `DW_MAX_REPAIR_ATTEMPTS` | int | `3` | Maximum SQL query repair attempts during the ReAct loop. |
 
 ---
 
@@ -71,7 +71,7 @@ All settings in DataWhisper can be configured via environment variables (`DW_*`)
 | Environment Variable | Type | Default | Description |
 | -------------------- | ---- | ------- | ----------- |
 | `DW_LLM_PROVIDER` | str | `gemini` | LLM provider: `gemini`, `openai`, `mock`. |
-| `DW_MODEL` | str | provider default | Model ID (e.g., `gemini-2.5-flash` or `gpt-4o-mini`). |
+| `DW_MODEL` | str | provider default | Model ID (e.g., `gemini-3-flash` or `gpt-4o-mini`). |
 | `DW_TEMPERATURE` | float | `0.0` | Sampling temperature for SQL generation (0.0 recommended for deterministic queries). |
 | `GEMINI_API_KEY` | str | `None` | API key for Google Gemini (`google-genai` client). |
 | `OPENAI_API_KEY` | str | `None` | API key for OpenAI API. |
